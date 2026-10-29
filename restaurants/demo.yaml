@@ -1,0 +1,178 @@
+# Demo restaurant. Everything the agent is allowed to say about the restaurant
+# comes from this file: it never invents an item, a price, an allergen or an hour.
+# To onboard a real restaurant, copy this file, edit it, and point
+# RESTAURANT_FILE at the copy. `./venv/bin/python -m voiceagent.menu <file>`
+# validates it and prints the menu exactly as the agent will see it.
+
+id: demo
+name: Juniper Street Kitchen
+address: 214 Juniper Street
+timezone: America/New_York
+
+# Spoken by Twilio the moment the call connects, before the model runs.
+greeting: >-
+  Thanks for calling Juniper Street Kitchen. I'm the automated ordering
+  assistant. What can I get started for you today?
+
+# E.164 number the "talk to a person" transfer dials. Empty means no live
+# transfer: the agent says the restaurant is busy and offers a callback note.
+staff_phone: ""
+
+tax_rate: 0.08
+pickup_wait_minutes: 20
+# Stop taking orders this many minutes before closing.
+last_order_minutes: 15
+max_quantity_per_line: 20
+payment_note: Payment is taken at pickup, card or cash. We never take card numbers over the phone.
+fulfillment: pickup
+
+hours:
+  mon: []
+  tue: [["11:30", "21:00"]]
+  wed: [["11:30", "21:00"]]
+  thu: [["11:30", "21:00"]]
+  fri: [["11:30", "22:00"]]
+  sat: [["12:00", "22:00"]]
+  sun: [["12:00", "20:00"]]
+
+# Facts the agent may repeat word for word. Anything not here (allergens not
+# listed, parking, catering) it says it does not know and offers a staff callback.
+facts:
+  - Every pizza is baked in a wood-fired oven, so we cannot guarantee anything is free of smoke or char.
+  - Gluten-free crust is available on the 10-inch size only and is prepared in a shared kitchen with wheat flour.
+  - Free street parking is available after 6 PM.
+
+menu:
+  - category: Pizzas
+    items:
+      - id: margherita
+        name: Margherita Pizza
+        description: Tomato, fresh mozzarella, basil.
+        price: 13.00
+        aliases: [margarita, cheese pizza, plain pizza]
+        dietary: [vegetarian]
+        allergens: [wheat, milk]
+        option_groups:
+          - &pizza_size
+            id: size
+            name: Size
+            min: 1
+            max: 1
+            options:
+              - {id: size_10, name: 10-inch, price: 0}
+              - {id: size_14, name: 14-inch, price: 5.00}
+          - &pizza_crust
+            id: crust
+            name: Crust
+            min: 0
+            max: 1
+            options:
+              - {id: crust_gf, name: gluten-free crust, price: 3.00, requires: [size_10]}
+          - &pizza_extras
+            id: extras
+            name: Extra toppings
+            min: 0
+            max: 4
+            options:
+              - {id: top_mushroom, name: mushrooms, price: 1.50}
+              - {id: top_pepperoni, name: pepperoni, price: 2.00}
+              - {id: top_sausage, name: Italian sausage, price: 2.00}
+              - {id: top_olive, name: black olives, price: 1.50}
+              - {id: top_jalapeno, name: jalapenos, price: 1.00}
+              - {id: top_extra_cheese, name: extra mozzarella, price: 1.50}
+      - id: pepperoni_honey
+        name: Hot Honey Pepperoni Pizza
+        description: Tomato, mozzarella, cup pepperoni, chili honey.
+        price: 15.50
+        aliases: [pepperoni pizza, hot honey, pepperoni]
+        allergens: [wheat, milk]
+        option_groups: [*pizza_size, *pizza_crust, *pizza_extras]
+      - id: wild_mushroom
+        name: Wild Mushroom Pizza
+        description: Roasted mushrooms, fontina, garlic, thyme, no tomato sauce.
+        price: 16.00
+        aliases: [mushroom pizza, white pizza]
+        dietary: [vegetarian]
+        allergens: [wheat, milk]
+        option_groups: [*pizza_size, *pizza_crust, *pizza_extras]
+
+  - category: Salads
+    items:
+      - id: caesar
+        name: Kale Caesar
+        description: Kale, romaine, parmesan, sourdough croutons, anchovy dressing.
+        price: 11.00
+        aliases: [caesar salad, kale salad]
+        allergens: [wheat, milk, egg, fish]
+        option_groups:
+          - id: protein
+            name: Add protein
+            min: 0
+            max: 1
+            options:
+              - {id: add_chicken, name: grilled chicken, price: 5.00}
+              - {id: add_chickpeas, name: crispy chickpeas, price: 3.00}
+      - id: beet_salad
+        name: Roasted Beet Salad
+        description: Beets, arugula, goat cheese, pistachios, citrus vinaigrette.
+        price: 12.00
+        aliases: [beet salad]
+        dietary: [vegetarian, gluten-free]
+        allergens: [milk, tree nuts]
+
+  - category: Sides
+    items:
+      - id: garlic_knots
+        name: Garlic Knots
+        description: Six knots with marinara for dipping.
+        price: 6.50
+        aliases: [knots, garlic bread]
+        dietary: [vegetarian]
+        allergens: [wheat, milk]
+      - id: wings
+        name: Wood-Fired Wings
+        description: Ten wings, choice of sauce.
+        price: 14.00
+        aliases: [chicken wings, wings]
+        dietary: [gluten-free]
+        option_groups:
+          - id: wing_sauce
+            name: Sauce
+            min: 1
+            max: 1
+            options:
+              - {id: sauce_buffalo, name: buffalo, price: 0}
+              - {id: sauce_lemon_pepper, name: lemon pepper dry rub, price: 0}
+              - {id: sauce_hot_honey, name: hot honey, price: 0}
+
+  - category: Desserts
+    items:
+      - id: tiramisu
+        name: Tiramisu
+        description: Espresso-soaked ladyfingers, mascarpone.
+        price: 8.00
+        dietary: [vegetarian]
+        allergens: [wheat, milk, egg]
+
+  - category: Drinks
+    items:
+      - id: soda
+        name: Can of Soda
+        price: 2.50
+        aliases: [soda, coke, pop, soft drink]
+        dietary: [vegetarian, gluten-free]
+        option_groups:
+          - id: soda_flavor
+            name: Flavor
+            min: 1
+            max: 1
+            options:
+              - {id: soda_cola, name: cola, price: 0}
+              - {id: soda_diet_cola, name: diet cola, price: 0}
+              - {id: soda_lemon_lime, name: lemon-lime, price: 0}
+              - {id: soda_ginger_ale, name: ginger ale, price: 0}
+      - id: sparkling_water
+        name: Sparkling Water
+        price: 3.00
+        aliases: [seltzer, sparkling]
+        dietary: [vegetarian, gluten-free]

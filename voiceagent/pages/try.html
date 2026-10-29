@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Call</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2b323c; --text:#e8ecf1; --muted:#9aa5b1; --accent:#f2a33a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px; }
+  header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  h1 { font-size:18px; margin:0; }
+  a { color:var(--accent); }
+  #log { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; min-height:320px; max-height:60vh; overflow-y:auto; }
+  .msg { margin:6px 0; }
+  .who { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .agent .text { color:var(--text); }
+  .caller .text { color:var(--accent); }
+  .sys { color:var(--muted); font-style:italic; font-size:13px; }
+  form { display:flex; gap:8px; margin-top:10px; }
+  input { flex:1; min-width:0; background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; }
+  button { background:#262d36; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:10px 14px; font:inherit; cursor:pointer; }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+  .muted { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Test call</h1><a href="/board">Kitchen board</a></header>
+  <div id="log"></div>
+  <form id="f"><input id="say" autocomplete="off" placeholder="Type what the caller says, then Enter"><button>Send</button></form>
+  <div class="row">
+    <button id="start">Start call</button>
+    <button id="mic" title="Chrome only: speak instead of typing">Mic off</button>
+    <label class="muted"><input type="checkbox" id="speak" checked> speak replies aloud</label>
+    <span class="muted" id="state">not connected</span>
+  </div>
+  <p class="muted">Same WebSocket protocol Twilio ConversationRelay uses, so this exercises the real agent, tools and order board. Every reply is a real Claude API call.</p>
+</div>
+<script>
+const log = document.getElementById("log"), state = document.getElementById("state");
+let ws = null, current = null, buffer = "", rec = null, micOn = false;
+
+function line(cls, who, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.innerHTML = who ? `<div class="who">${who}</div><div class="text"></div>` : `<div class="sys"></div>`;
+  d.lastChild.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d.lastChild;
+}
+
+function speak(text) {
+  if (!document.getElementById("speak").checked || !text.trim() || !window.speechSynthesis) return;
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+}
+
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+function callerSays(text) {
+  text = text.trim();
+  if (!text || !ws) return;
+  if (window.speechSynthesis && speechSynthesis.speaking) { speechSynthesis.cancel(); send({ type: "interrupt" }); }
+  line("caller", "caller", text);
+  current = null; buffer = "";
+  send({ type: "prompt", voicePrompt: text, last: true });
+}
+
+document.getElementById("start").onclick = () => {
+  if (ws) { ws.close(); return; }
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/sim");
+  ws.onopen = () => { state.textContent = "connected"; document.getElementById("start").textContent = "Hang up"; };
+  ws.onclose = e => {
+    state.textContent = e.code === 4429 ? "all lines busy" : e.code === 4401 ? "log in first" : "call ended";
+    document.getElementById("start").textContent = "Start call"; ws = null;
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "text") {
+      if (!current) current = line("agent", "agent", "");
+      current.textContent += m.token; buffer += m.token;
+      log.scrollTop = log.scrollHeight;
+      if (m.last) { speak(buffer); current = null; buffer = ""; }
+    } else if (m.type === "end") {
+      const h = JSON.parse(m.handoffData || "{}");
+      line("sys", "", `Agent ended the call (${h.reasonCode}${h.orderId ? ", order #" + h.orderId : ""}${h.reason ? ": " + h.reason : ""}).`);
+      setTimeout(() => ws && ws.close(), 300);
+    }
+  };
+};
+
+document.getElementById("f").onsubmit = e => {
+  e.preventDefault();
+  const box = document.getElementById("say");
+  callerSays(box.value); box.value = "";
+};
+
+document.getElementById("mic").onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { line("sys", "", "This browser has no speech recognition; type instead."); return; }
+  const btn = document.getElementById("mic");
+  if (micOn) { micOn = false; rec && rec.stop(); btn.textContent = "Mic off"; btn.classList.remove("on"); return; }
+  rec = new SR(); rec.lang = "en-US"; rec.continuous = true; rec.interimResults = false;
+  rec.onresult = ev => { const r = ev.results[ev.results.length - 1]; if (r.isFinal) callerSays(r[0].transcript); };
+  rec.onend = () => { if (micOn) rec.start(); };
+  micOn = true; rec.start(); btn.textContent = "Mic on"; btn.classList.add("on");
+};
+</script>
+</body>
+</html>

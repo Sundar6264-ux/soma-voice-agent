@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kitchen Board</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2b323c; --text:#e8ecf1; --muted:#9aa5b1; --accent:#f2a33a; --ok:#4cc38a; --bad:#e5484d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; }
+  header a { color:var(--accent); }
+  main { padding:16px; display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(290px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card.new { border-color:var(--accent); }
+  .top { display:flex; justify-content:space-between; align-items:baseline; }
+  .num { font-size:22px; font-weight:700; }
+  .status { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .new .status { color:var(--accent); }
+  ul { margin:10px 0; padding-left:18px; }
+  li small { color:var(--muted); display:block; }
+  .meta { color:var(--muted); font-size:13px; }
+  .total { font-weight:600; margin-top:6px; }
+  .actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  button { background:#262d36; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font:inherit; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .empty { color:var(--muted); padding:24px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Kitchen board</h1>
+  <span class="meta"><a href="/try">Test call</a> · refreshed <span id="when">never</span></span>
+</header>
+<main id="orders"></main>
+<div class="empty" id="empty" hidden>No orders yet. Call the number, or place a test order from <a href="/try">the test call page</a>.</div>
+<script>
+const NEXT = { new: ["accepted", "cancelled"], accepted: ["ready", "cancelled"], ready: ["picked_up"], picked_up: [], cancelled: [] };
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+const money = c => "$" + (c / 100).toFixed(2);
+const time = iso => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+async function setStatus(id, status) {
+  await fetch(`/api/orders/${id}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
+  load();
+}
+
+function render(data) {
+  document.getElementById("title").textContent = data.restaurant + " · orders";
+  const root = document.getElementById("orders");
+  document.getElementById("empty").hidden = data.orders.length > 0;
+  root.innerHTML = data.orders.map(o => `
+    <section class="card ${o.status === "new" ? "new" : ""}">
+      <div class="top"><span class="num">#${o.id}</span><span class="status">${esc(o.status.replace("_", " "))}</span></div>
+      <div class="meta">${esc(o.customer_name)} · ${esc(o.customer_phone)} · ready ${time(o.ready_at)}</div>
+      <ul>${o.lines.map(l => `<li>${l.quantity} × ${esc(l.name)}
+        ${l.options.length ? `<small>${esc(l.options.map(x => x.name).join(", "))}</small>` : ""}
+        ${l.instructions ? `<small>Note: ${esc(l.instructions)}</small>` : ""}</li>`).join("")}</ul>
+      <div class="total">${money(o.total_cents)} <span class="meta">incl. ${money(o.tax_cents)} tax · pay at pickup</span></div>
+      <div class="actions">${NEXT[o.status].map(s => `<button onclick="setStatus(${o.id}, '${s}')">${s.replace("_", " ")}</button>`).join("")}</div>
+    </section>`).join("");
+  document.getElementById("when").textContent = new Date().toLocaleTimeString();
+}
+
+async function load() {
+  try {
+    const r = await fetch("/api/orders");
+    if (r.status === 401) { location.href = "/login-required"; return; }
+    render(await r.json());
+  } catch (e) { document.getElementById("when").textContent = "offline"; }
+}
+load();
+setInterval(load, 4000);
+</script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+"""FastAPI app: Twilio webhooks, the relay WebSocket, the kitchen board, the browser test call."""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import secrets
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+
+from . import twilio
+from .agent import AnthropicLLM, Conversation
+from .config import Settings
+from .menu import load_restaurant
+from .prompts import build_system_prompt
+from .relay import RelaySession
+from .store import ORDER_STATUSES, Store
+
+log = logging.getLogger(__name__)
+PAGES = Path(__file__).parent / "pages"
+ADMIN_COOKIE = "rva_admin"
+
+
+def create_app(settings: Settings | None = None, llm=None) -> FastAPI:
+    settings = settings or Settings.from_env()
+    restaurant = load_restaurant(settings.restaurant_file)
+    store = Store(settings.db_path)
+    system_prompt = build_system_prompt(restaurant)
+    sessions = {"live": 0}
+    llm_holder = {"llm": llm}
+    has_credentials = llm is not None or bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    if not has_credentials:
+        log.warning("no ANTHROPIC_API_KEY: every call will hear an apology and hang up")
+
+    app = FastAPI(title="Restaurant voice agent", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.settings, app.state.restaurant, app.state.store = settings, restaurant, store
+
+    def get_llm():
+        if llm_holder["llm"] is None:
+            llm_holder["llm"] = AnthropicLLM(settings.model, settings.effort)
+        return llm_holder["llm"]
+
+    def make_conversation(call):
+        return Conversation(restaurant, store, get_llm(), call, system_prompt=system_prompt)
+
+    # -- admin auth (board, browser test call) ----------------------------
+
+    def admin_cookie_value() -> str:
+        return hmac.new(settings.admin_key.encode(), b"rva-admin", hashlib.sha256).hexdigest()
+
+    def is_admin(cookies) -> bool:
+        return bool(settings.admin_key) and hmac.compare_digest(cookies.get(ADMIN_COOKIE, ""), admin_cookie_value())
+
+    def require_admin(request: Request) -> None:
+        if not is_admin(request.cookies):
+            raise HTTPException(status_code=401, detail="open /login?key=... first")
+
+    @app.get("/login")
+    async def login(key: str = "", next: str = "/board"):
+        if not settings.admin_key or not hmac.compare_digest(key, settings.admin_key):
+            raise HTTPException(status_code=401, detail="wrong or missing key")
+        target = next if next in {"/board", "/try"} else "/board"
+        resp = RedirectResponse(target, status_code=303)
+        resp.set_cookie(ADMIN_COOKIE, admin_cookie_value(), httponly=True, samesite="strict",
+                        secure=settings.public_base_url.startswith("https://"), max_age=30 * 86400)
+        return resp
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "restaurant": restaurant.id, "model": settings.model, "claude_credentials": has_credentials,
+                "twilio_signing": bool(settings.twilio_auth_token) and not settings.allow_unsigned_twilio,
+                "live_sessions": sessions["live"]}
+
+    # -- Twilio ------------------------------------------------------------
+
+    async def twilio_form(request: Request) -> dict[str, str]:
+        form = {k: str(v) for k, v in (await request.form()).items()}
+        if settings.allow_unsigned_twilio:
+            return form
+        if not settings.public_base_url:
+            raise HTTPException(status_code=503, detail="PUBLIC_BASE_URL is not set")
+        url = settings.public_base_url + request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        if not twilio.valid_request(settings.twilio_auth_token, url, form, request.headers.get("X-Twilio-Signature", "")):
+            log.warning("rejected unsigned or mis-signed Twilio request to %s", request.url.path)
+            raise HTTPException(status_code=403, detail="bad signature")
+        return form
+
+    def xml(body: str) -> Response:
+        return Response(body, media_type="text/xml")
+
+    @app.post("/twilio/voice")
+    async def twilio_voice(request: Request):
+        form = await twilio_form(request)
+        call_sid = form.get("CallSid", "")
+        if not call_sid:
+            raise HTTPException(status_code=400, detail="no CallSid")
+        if sessions["live"] >= settings.max_sessions:
+            return xml(twilio.say_hangup_twiml(
+                f"Sorry, all of our lines at {restaurant.name} are busy. Please call back in a few minutes."))
+        token = twilio.relay_token(settings.relay_secret, call_sid)
+        ws_url = f"{settings.ws_base_url}/relay?call={call_sid}&token={token}"
+        return xml(twilio.connect_twiml(ws_url=ws_url, action_url=f"{settings.public_base_url}/twilio/relay-done",
+                                        restaurant=restaurant, relay_attrs=settings.relay_attrs))
+
+    @app.post("/twilio/relay-done")
+    async def twilio_relay_done(request: Request):
+        """Twilio calls this when the relay ends: our `end` message, a dropped socket, or a hang-up."""
+        form = await twilio_form(request)
+        try:
+            handoff = json.loads(form.get("HandoffData") or "{}")
+        except json.JSONDecodeError:
+            handoff = {}
+        reason = handoff.get("reasonCode")
+        if reason == "transfer" and restaurant.staff_phone:
+            return xml(twilio.dial_twiml(restaurant.staff_phone,
+                                         "Sorry, nobody could pick up. Please call back in a few minutes. Goodbye."))
+        if reason in {"end", "transfer"}:
+            return xml(twilio.hangup_twiml())
+        return xml(twilio.say_hangup_twiml("Sorry, we got disconnected. Please call back. Goodbye."))
+
+    async def run_relay(websocket: WebSocket, relay: RelaySession, first: dict | None = None) -> None:
+        sessions["live"] += 1
+        try:
+            if first:
+                await relay.handle(first)
+            while True:
+                msg = await websocket.receive_json()
+                await relay.handle(msg)
+        except WebSocketDisconnect:
+            pass
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            log.warning("bad relay message: %r", exc)
+        finally:
+            sessions["live"] -= 1
+            await relay.close()
+
+    @app.websocket("/relay")
+    async def relay_ws(websocket: WebSocket, call: str = "", token: str = ""):
+        if not twilio.valid_relay_token(settings.relay_secret, call, token):
+            await websocket.close(code=4403)
+            return
+        await websocket.accept()
+        relay = RelaySession(websocket.send_json, make_conversation, store, restaurant.id,
+                             channel="phone", expected_call_sid=call)
+        await run_relay(websocket, relay)
+
+    # -- browser test call (same protocol as Twilio) -----------------------
+
+    @app.websocket("/sim")
+    async def sim_ws(websocket: WebSocket):
+        if not is_admin(websocket.cookies):
+            await websocket.close(code=4401)
+            return
+        if sessions["live"] >= settings.max_sessions:
+            await websocket.close(code=4429)
+            return
+        await websocket.accept()
+        await websocket.send_json({"type": "text", "token": restaurant.greeting, "last": True})
+        relay = RelaySession(websocket.send_json, make_conversation, store, restaurant.id, channel="browser")
+        await run_relay(websocket, relay, first={"type": "setup", "callSid": "web-" + secrets.token_hex(6), "from": ""})
+
+    @app.get("/try")
+    async def try_page(request: Request):
+        if not is_admin(request.cookies):
+            return RedirectResponse("/login-required", status_code=303)
+        return FileResponse(PAGES / "try.html")
+
+    # -- kitchen board -----------------------------------------------------
+
+    @app.get("/board")
+    async def board(request: Request):
+        if not is_admin(request.cookies):
+            return RedirectResponse("/login-required", status_code=303)
+        return FileResponse(PAGES / "board.html")
+
+    @app.get("/login-required", response_class=HTMLResponse)
+    async def login_required():
+        return HTMLResponse("<p style='font-family:sans-serif'>Open <code>/login?key=YOUR_ADMIN_KEY</code> first.</p>",
+                            status_code=401)
+
+    @app.get("/api/orders")
+    async def api_orders(request: Request):
+        require_admin(request)
+        return {"restaurant": restaurant.name, "orders": store.recent_orders(restaurant.id)}
+
+    @app.post("/api/orders/{order_id}/status")
+    async def api_order_status(order_id: int, request: Request):
+        require_admin(request)
+        status = (await request.json()).get("status", "")
+        if status not in ORDER_STATUSES:
+            raise HTTPException(status_code=400, detail=f"status must be one of {ORDER_STATUSES}")
+        if not store.set_status(order_id, status):
+            raise HTTPException(status_code=404, detail="no such order")
+        return {"ok": True}
+
+    @app.get("/api/calls")
+    async def api_calls(request: Request):
+        require_admin(request)
+        return {"calls": store.recent_calls(restaurant.id)}
+
+    return app
+
+
+def _app_factory() -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    return create_app()
