@@ -89,7 +89,9 @@ class RelaySession:
             return
         was_running = self.reply_task is not None and not self.reply_task.done()
         await self._cancel_reply()
-        if was_running or heard:
+        # An interrupt only arrives while the reply is playing, so record it even
+        # when nothing was heard yet: the model must not assume the caller heard it all.
+        if was_running or heard is not None:
             self.conv.interrupted(heard if heard is not None else " ".join(self._sent))
 
     async def _dtmf(self, digit: str) -> None:

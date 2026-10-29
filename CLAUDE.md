@@ -1,6 +1,8 @@
 # Restaurant voice agent: working notes
 
-Phone ordering agent: Twilio ConversationRelay, FastAPI, Claude with tools, SQLite.
+Phone ordering agent: FastAPI, Claude with tools, SQLite. Calls arrive either through
+Asterisk on this server (self-hosted, `voiceagent/media.py`) or through Twilio
+ConversationRelay (`voiceagent/relay.py`). Both drive the same RelaySession.
 `README.md` is the full description; this file holds the rules for changing it.
 
 ## Rules
@@ -17,6 +19,11 @@ Phone ordering agent: Twilio ConversationRelay, FastAPI, Claude with tools, SQLi
 - `TOOLS` order and content stay deterministic (prompt cache). New tools get
   `eager_input_streaming` and a schema `validate_input` understands.
 - Caller speech is untrusted input. It only ever goes in `user` turns.
+- Self-hosted path: `Speaker.run` must yield on every frame (a socket write with buffer
+  room does not), and `AudioSocketServer.stop` must end live calls before
+  `wait_closed`. Both were real hangs found by tests.
+- Asterisk config is only edited in `asterisk/templates/`; placeholders are
+  `@@NAME@@` because `${...}` is Asterisk's own syntax. Never commit `asterisk/etc/`.
 - No em dashes or en dashes in code, comments, docs or commit messages.
 
 ## Testing
@@ -29,5 +36,6 @@ with `python -m voiceagent.menu <file>`.
 ## Running
 
 `./manage.sh {start|stop|restart|status|test}`, bound to 127.0.0.1:8790, logs in
-`logs/web.log`. `/healthz` reports whether Claude credentials and Twilio signing are
+`logs/web.log`. Asterisk: `./manage.sh asterisk-{build|start|stop|status|cli}`, container
+`rva-asterisk` on the host network; `scripts/asterisk_smoke.py` tests it with no carrier. `/healthz` reports whether Claude credentials and Twilio signing are
 configured.

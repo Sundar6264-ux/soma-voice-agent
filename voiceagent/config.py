@@ -37,6 +37,18 @@ class Settings:
     relay_secret: str
     max_sessions: int
     relay_attrs: dict
+    # Self-hosted call path (Asterisk + AssemblyAI + Inworld). Off unless ASTERISK_TOKEN is set.
+    asterisk_token: str = ""
+    audiosocket_port: int = 9092
+    assemblyai_api_key: str = ""
+    inworld_api_key: str = ""
+    inworld_voice: str = "Ashley"
+    inworld_model: str = "inworld-tts-1.5-mini"
+    inworld_speaking_rate: float = 1.0
+
+    @property
+    def selfhost_enabled(self) -> bool:
+        return bool(self.asterisk_token)
 
     @property
     def ws_base_url(self) -> str:
@@ -65,4 +77,11 @@ class Settings:
                 "transcriptionProvider": env("RELAY_TRANSCRIPTION_PROVIDER", ""),
                 "speechModel": env("RELAY_SPEECH_MODEL", ""),
             },
+            asterisk_token=env("ASTERISK_TOKEN", ""),
+            audiosocket_port=int(env("AUDIOSOCKET_PORT", "9092")),
+            assemblyai_api_key=env("ASSEMBLYAI_API_KEY", ""),
+            inworld_api_key=env("INWORLD_API_KEY", ""),
+            inworld_voice=env("INWORLD_VOICE", "Ashley"),
+            inworld_model=env("INWORLD_MODEL", "inworld-tts-1.5-mini"),
+            inworld_speaking_rate=float(env("INWORLD_SPEAKING_RATE", "1.0")),
         )

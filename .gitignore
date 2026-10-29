@@ -4,3 +4,4 @@ venv/
 *.db-journal
 logs/
 __pycache__/
+asterisk/etc/

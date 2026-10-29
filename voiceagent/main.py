@@ -7,17 +7,22 @@ import json
 import logging
 import os
 import secrets
+import time
+import uuid as uuidlib
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from . import twilio
 from .agent import AnthropicLLM, Conversation
 from .config import Settings
+from .media import AudioSocketServer, MediaCall
 from .menu import load_restaurant
 from .prompts import build_system_prompt
 from .relay import RelaySession
+from .speech import AssemblyAISTT, InworldTTS
 from .store import ORDER_STATUSES, Store
 
 log = logging.getLogger(__name__)
@@ -25,7 +30,11 @@ PAGES = Path(__file__).parent / "pages"
 ADMIN_COOKIE = "rva_admin"
 
 
-def create_app(settings: Settings | None = None, llm=None) -> FastAPI:
+PENDING_TTL_SECONDS = 60
+
+
+def create_app(settings: Settings | None = None, llm=None, stt_factory=None, synthesize=None,
+               frame_seconds: float | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     restaurant = load_restaurant(settings.restaurant_file)
     store = Store(settings.db_path)
@@ -36,8 +45,85 @@ def create_app(settings: Settings | None = None, llm=None) -> FastAPI:
     if not has_credentials:
         log.warning("no ANTHROPIC_API_KEY: every call will hear an apology and hang up")
 
-    app = FastAPI(title="Restaurant voice agent", docs_url=None, redoc_url=None, openapi_url=None)
+    # -- self-hosted call path (Asterisk AudioSocket) -------------------------
+    pending_calls: dict[str, tuple[str, float]] = {}   # call id -> (caller number, registered at)
+    call_results: dict[str, tuple[str, float]] = {}    # call id -> ("hangup" | "transfer", finished at)
+
+    def make_stt():
+        if stt_factory:
+            return stt_factory()
+        return AssemblyAISTT(settings.assemblyai_api_key)
+
+    tts_holder = {"synth": synthesize}
+
+    def get_synth():
+        if tts_holder["synth"] is None:
+            tts = InworldTTS(settings.inworld_api_key, voice=settings.inworld_voice, model=settings.inworld_model,
+                             speaking_rate=settings.inworld_speaking_rate)
+            tts_holder["synth"] = tts.synthesize
+        return tts_holder["synth"]
+
+    async def start_media_call(call_id: str, reader, writer) -> None:
+        entry = pending_calls.pop(call_id, None)
+        if entry is None or time.monotonic() - entry[1] > PENDING_TTL_SECONDS:
+            raise ValueError(f"unknown or expired call id {call_id}")
+        sessions["live"] += 1
+        try:
+            make_relay = lambda send, sleep: RelaySession(send, make_conversation, store, restaurant.id,
+                                                          channel="phone", sleep=sleep)
+            kwargs = {"frame_seconds": frame_seconds} if frame_seconds else {}
+            call = MediaCall(reader, writer, call_id=call_id, from_number=entry[0], greeting=restaurant.greeting,
+                             stt=make_stt(), synthesize=get_synth(), make_relay=make_relay, **kwargs)
+            action = await call.run()
+        finally:
+            sessions["live"] -= 1
+        now = time.monotonic()
+        call_results[call_id] = (action, now)
+        for key in [k for k, (_, at) in call_results.items() if now - at > 300]:
+            call_results.pop(key, None)
+
+    audiosocket = AudioSocketServer("127.0.0.1", settings.audiosocket_port, start_media_call)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        if settings.selfhost_enabled:
+            missing = [n for n, v in (("ASSEMBLYAI_API_KEY", settings.assemblyai_api_key or stt_factory),
+                                      ("INWORLD_API_KEY", settings.inworld_api_key or synthesize)) if not v]
+            if missing:
+                log.warning("self-hosted calls enabled but %s missing: callers will hear nothing", ", ".join(missing))
+            await audiosocket.start()
+        try:
+            yield
+        finally:
+            await audiosocket.stop()
+
+    app = FastAPI(title="Restaurant voice agent", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.settings, app.state.restaurant, app.state.store = settings, restaurant, store
+    app.state.audiosocket = audiosocket
+
+    def require_asterisk(token: str) -> None:
+        if not settings.selfhost_enabled or not hmac.compare_digest(token, settings.asterisk_token):
+            raise HTTPException(status_code=403, detail="bad token")
+
+    @app.get("/asterisk/start", response_class=PlainTextResponse)
+    async def asterisk_start(request: Request):
+        q = request.query_params
+        require_asterisk(q.get("token", ""))
+        if sessions["live"] + len(pending_calls) >= settings.max_sessions:
+            return PlainTextResponse("busy")
+        now = time.monotonic()
+        for key in [k for k, (_, at) in pending_calls.items() if now - at > PENDING_TTL_SECONDS]:
+            pending_calls.pop(key, None)
+        call_id = str(uuidlib.uuid4())
+        pending_calls[call_id] = (q.get("from", "")[:32], now)
+        log.info("asterisk call %s from %s to %s", call_id, q.get("from", ""), q.get("to", ""))
+        return PlainTextResponse(call_id)
+
+    @app.get("/asterisk/next", response_class=PlainTextResponse)
+    async def asterisk_next(token: str = "", call: str = ""):
+        require_asterisk(token)
+        action, _ = call_results.pop(call, ("hangup", 0))
+        return PlainTextResponse(action)
 
     def get_llm():
         if llm_holder["llm"] is None:
@@ -73,6 +159,8 @@ def create_app(settings: Settings | None = None, llm=None) -> FastAPI:
     async def healthz():
         return {"ok": True, "restaurant": restaurant.id, "model": settings.model, "claude_credentials": has_credentials,
                 "twilio_signing": bool(settings.twilio_auth_token) and not settings.allow_unsigned_twilio,
+                "selfhost_calls": settings.selfhost_enabled,
+                "assemblyai_key": bool(settings.assemblyai_api_key), "inworld_key": bool(settings.inworld_api_key),
                 "live_sessions": sessions["live"]}
 
     # -- Twilio ------------------------------------------------------------
