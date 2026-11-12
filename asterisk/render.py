@@ -21,48 +21,83 @@ from voiceagent.menu import load_restaurant  # noqa: E402
 
 TEMPLATES = ROOT / "asterisk" / "templates"
 OUT = ROOT / "asterisk" / "etc"
-REQUIRED = ("SIP_SERVER", "SIP_USERNAME", "SIP_PASSWORD", "SIP_MATCH", "EXTERNAL_IP", "ASTERISK_TOKEN")
+PARTS = ROOT / "asterisk" / "parts"
+TRUNK_KEYS = ("SIP_SERVER", "SIP_USERNAME", "SIP_PASSWORD", "SIP_MATCH", "EXTERNAL_IP")
+UNSAFE = "\n\r;[]"
+
+
+def _clean(key: str, value: str) -> str:
+    if any(c in value for c in UNSAFE):
+        raise SystemExit(f"{key} contains a character that would break the Asterisk config")
+    return value
+
+
+def _fill(text: str, vals: dict[str, str]) -> str:
+    for key, val in vals.items():
+        text = text.replace(f"@@{key}@@", val)
+    return text
 
 
 def values() -> dict[str, str]:
+    """Placeholders for every template. The carrier line (trunk) and the Tailscale phone app
+    (softphone) are each optional, but at least one must be configured."""
     settings = Settings.from_env()  # also loads .env into os.environ
-    env = os.environ.get
-    missing = [k for k in REQUIRED if not env(k)]
-    if missing:
-        raise SystemExit(f"missing in .env: {', '.join(missing)} (see .env.example, self-hosted calls section)")
-    for cidr in env("SIP_MATCH").split(","):
-        ipaddress.ip_network(cidr.strip(), strict=False)  # raises on a typo
-    ipaddress.ip_address(env("EXTERNAL_IP"))
-    for k in ("SIP_SERVER", "SIP_USERNAME", "SIP_PASSWORD", "ASTERISK_TOKEN"):
-        if any(c in env(k) for c in "\n\r;[]"):
-            raise SystemExit(f"{k} contains a character that would break the Asterisk config")
+    env = lambda k, d="": os.environ.get(k, d) or d
+    if not env("ASTERISK_TOKEN"):
+        raise SystemExit("missing in .env: ASTERISK_TOKEN")
+    trunk_set = [k for k in TRUNK_KEYS if env(k)]
+    trunk_on = bool(trunk_set)
+    if trunk_on and len(trunk_set) != len(TRUNK_KEYS):
+        missing = [k for k in TRUNK_KEYS if not env(k)]
+        raise SystemExit(f"carrier line half configured; missing in .env: {', '.join(missing)}")
+    softphone_on = bool(env("SOFTPHONE_PASSWORD"))
+    if not trunk_on and not softphone_on:
+        raise SystemExit("nothing to answer calls from: set the carrier (SIP_*) or SOFTPHONE_PASSWORD in .env")
+    if softphone_on and len(env("SOFTPHONE_PASSWORD")) < 12:
+        raise SystemExit("SOFTPHONE_PASSWORD must be at least 12 characters")
     restaurant = load_restaurant(settings.restaurant_file)
     staff = env("STAFF_DIAL") or restaurant.staff_phone.lstrip("+")
     if staff and not staff.isdigit():
         raise SystemExit("STAFF_DIAL must be digits only")
-    return {
-        "SIP_SERVER": env("SIP_SERVER"),
-        "SIP_USERNAME": env("SIP_USERNAME"),
-        "SIP_PASSWORD": env("SIP_PASSWORD"),
-        "MATCH_LINES": "\n".join(f"match = {c.strip()}" for c in env("SIP_MATCH").split(",")),
-        "EXTERNAL_IP": env("EXTERNAL_IP"),
-        "LOCAL_NET": env("LOCAL_NET", "192.168.0.0/16"),
+    if not trunk_on:
+        staff = ""  # transfers need the carrier line
+    vals = {
         "SIP_PORT": env("SIP_PORT", "5060"),
+        "LOCAL_NET": env("LOCAL_NET", "192.168.0.0/16"),
         "RTP_START": env("RTP_START", "10000"),
         "RTP_END": env("RTP_END", "10099"),
         "APP_PORT": env("PORT", "8790"),
         "AUDIOSOCKET_PORT": str(settings.audiosocket_port),
-        "ASTERISK_TOKEN": env("ASTERISK_TOKEN"),
+        "ASTERISK_TOKEN": _clean("ASTERISK_TOKEN", env("ASTERISK_TOKEN")),
         "STAFF_DIAL": staff,
+        "EXTERNAL_LINES": "",
+        "TRUNK": "; carrier line not configured (SIP_* in .env)",
+        "SOFTPHONE": "; Tailscale phone app not configured (SOFTPHONE_PASSWORD in .env)",
     }
+    ipaddress.ip_network(vals["LOCAL_NET"], strict=False)
+    if trunk_on:
+        for cidr in env("SIP_MATCH").split(","):
+            ipaddress.ip_network(cidr.strip(), strict=False)  # raises on a typo
+        ipaddress.ip_address(env("EXTERNAL_IP"))
+        trunk_vals = {k: _clean(k, env(k)) for k in ("SIP_SERVER", "SIP_USERNAME", "SIP_PASSWORD")}
+        trunk_vals["MATCH_LINES"] = "\n".join(f"match = {c.strip()}" for c in env("SIP_MATCH").split(","))
+        vals["TRUNK"] = _fill((PARTS / "pjsip_trunk.conf").read_text(), trunk_vals)
+        vals["EXTERNAL_LINES"] = (f"external_media_address = {env('EXTERNAL_IP')}\n"
+                                  f"external_signaling_address = {env('EXTERNAL_IP')}")
+    if softphone_on:
+        user = _clean("SOFTPHONE_USER", env("SOFTPHONE_USER", "phone"))
+        if not user.isalnum():
+            raise SystemExit("SOFTPHONE_USER must be letters and digits only")
+        vals["SOFTPHONE"] = _fill((PARTS / "pjsip_softphone.conf").read_text(),
+                                  {"SOFTPHONE_USER": user, "SOFTPHONE_PASSWORD": _clean("SOFTPHONE_PASSWORD", env("SOFTPHONE_PASSWORD"))})
+    print(f"carrier line: {'on' if trunk_on else 'off'}; Tailscale phone app: {'on' if softphone_on else 'off'}")
+    return vals
 
 
 def render(vals: dict[str, str]) -> dict[str, str]:
     out = {}
     for tpl in sorted(TEMPLATES.glob("*.conf")):
-        text = tpl.read_text()
-        for key, val in vals.items():
-            text = text.replace(f"@@{key}@@", val)
+        text = _fill(tpl.read_text(), vals)
         if "@@" in text:
             raise SystemExit(f"{tpl.name}: unfilled placeholder left")
         out[tpl.name] = text
