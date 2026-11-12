@@ -6,6 +6,7 @@ Audio everywhere is 8 kHz 16-bit mono PCM, the format Asterisk hands us.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -90,16 +91,30 @@ class AssemblyAISTT:
 
 
 class InworldTTS:
+    """Inworld streaming TTS with a cap on simultaneous requests.
+
+    Each sentence is synthesized as soon as the model finishes it, so a long reply would otherwise
+    open several requests at once and hit Inworld's per-account concurrency limit (low on the free
+    tier; over-limit requests are rejected with HTTP 429). Requests queue on a semaphore in the
+    order they were made, so sentences still play in order and the next one is prepared while the
+    current one plays. A 429 is retried with backoff instead of dropping the sentence.
+    """
+
     def __init__(self, api_key: str, *, voice: str, model: str, speaking_rate: float = 1.0,
-                 client: httpx.AsyncClient | None = None):
+                 client: httpx.AsyncClient | None = None, max_concurrent: int = 2, retry_delays=(0.3, 0.8, 1.6)):
         self.api_key = api_key
         self.voice = voice
         self.model = model
         self.speaking_rate = speaking_rate
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0))
+        self.max_concurrent = max_concurrent
+        self.retry_delays = tuple(retry_delays)
+        self._slots: asyncio.Semaphore | None = None
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Yield raw 8 kHz PCM chunks as Inworld generates them."""
+        if self._slots is None:
+            self._slots = asyncio.Semaphore(self.max_concurrent)
         body = {
             "text": text,
             "voiceId": self.voice,
@@ -107,16 +122,24 @@ class InworldTTS:
             "audioConfig": {"audioEncoding": "PCM", "sampleRateHertz": 8000, "speakingRate": self.speaking_rate},
         }
         headers = {"Authorization": f"Basic {self.api_key}", "Content-Type": "application/json"}
-        async with self.client.stream("POST", INWORLD_URL, json=body, headers=headers) as resp:
-            if resp.status_code != 200:
-                detail = (await resp.aread())[:300]
-                raise RuntimeError(f"Inworld TTS HTTP {resp.status_code}: {detail!r}")
-            async for line in resp.aiter_lines():
-                if not line.strip():
-                    continue
-                msg = json.loads(line)
-                if "error" in msg:
-                    raise RuntimeError(f"Inworld TTS error: {msg['error']}")
-                audio = (msg.get("result") or {}).get("audioContent")
-                if audio:
-                    yield base64.b64decode(audio)
+        async with self._slots:
+            for attempt in range(len(self.retry_delays) + 1):
+                async with self.client.stream("POST", INWORLD_URL, json=body, headers=headers) as resp:
+                    if resp.status_code == 429 and attempt < len(self.retry_delays):
+                        await resp.aread()
+                        log.warning("Inworld concurrency limit hit; retrying in %.1fs", self.retry_delays[attempt])
+                        await asyncio.sleep(self.retry_delays[attempt])
+                        continue
+                    if resp.status_code != 200:
+                        detail = (await resp.aread())[:300]
+                        raise RuntimeError(f"Inworld TTS HTTP {resp.status_code}: {detail!r}")
+                    async for line in resp.aiter_lines():
+                        if not line.strip():
+                            continue
+                        msg = json.loads(line)
+                        if "error" in msg:
+                            raise RuntimeError(f"Inworld TTS error: {msg['error']}")
+                        audio = (msg.get("result") or {}).get("audioContent")
+                        if audio:
+                            yield base64.b64decode(audio)
+                    return

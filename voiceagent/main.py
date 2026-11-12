@@ -59,7 +59,8 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     def get_synth():
         if tts_holder["synth"] is None:
             tts = InworldTTS(settings.inworld_api_key, voice=settings.inworld_voice, model=settings.inworld_model,
-                             speaking_rate=settings.inworld_speaking_rate)
+                             speaking_rate=settings.inworld_speaking_rate,
+                             max_concurrent=settings.inworld_max_concurrent)
             tts_holder["synth"] = tts.synthesize
         return tts_holder["synth"]
 

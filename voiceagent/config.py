@@ -45,6 +45,7 @@ class Settings:
     inworld_voice: str = "Ashley"
     inworld_model: str = "inworld-tts-1.5-mini"
     inworld_speaking_rate: float = 1.0
+    inworld_max_concurrent: int = 2   # Inworld's free tier allows only a few simultaneous requests
     # Testing only: "18:00" makes the agent's clock read that time today (restaurant timezone),
     # so orders can be tested outside opening hours. Empty in real use.
     demo_time: str = ""
@@ -87,5 +88,6 @@ class Settings:
             inworld_voice=env("INWORLD_VOICE", "Ashley"),
             inworld_model=env("INWORLD_MODEL", "inworld-tts-1.5-mini"),
             inworld_speaking_rate=float(env("INWORLD_SPEAKING_RATE", "1.0")),
+            inworld_max_concurrent=int(env("INWORLD_MAX_CONCURRENT", "2")),
             demo_time=env("DEMO_TIME", "").strip(),
         )
