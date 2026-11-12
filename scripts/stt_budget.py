@@ -77,6 +77,10 @@ def main() -> int:
         send_alert(50, u, test=True)
         print(f"test alert sent to {ALERT_TO}")
         return 0
+    if args.test_email:
+        send_alert(50, u, test=True)
+        print(f"test alert sent to {ALERT_TO}")
+        return 0
     if not args.alert:
         return 0
     STATE.parent.mkdir(exist_ok=True)
