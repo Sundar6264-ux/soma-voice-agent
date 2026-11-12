@@ -72,10 +72,10 @@ async def main() -> int:
     spoke_until = 0.0
 
     async def listen():
+        # Natural pauses split a long sentence into several turns; keep them all.
         async for ev in stt.events():
             if ev.kind == "turn":
                 turns.append((time.monotonic(), ev.text))
-                return
 
     listener = asyncio.create_task(listen())
     chunk = BYTES_PER_SEC // 10
@@ -84,23 +84,19 @@ async def main() -> int:
         await asyncio.sleep(0.1)
     spoke_until = time.monotonic()
     silence = b"\x00" * chunk
-    for _ in range(40):  # up to 4 s of silence
-        if listener.done():
-            break
+    for _ in range(25):  # 2.5 s of silence lets the last turn close
         await stt.send_audio(silence)
         await asyncio.sleep(0.1)
-    try:
-        await asyncio.wait_for(listener, timeout=3)
-    except asyncio.TimeoutError:
-        pass
     await stt.close()
+    listener.cancel()
     from voiceagent.store import Store
     Store(s.db_path).record_stt("speech-check", stt.billed_seconds)
     if not turns:
         print("FAIL: AssemblyAI returned no finished turn")
         return 1
-    at, heard = turns[0]
-    print(f"AssemblyAI: turn ready {at - spoke_until:.2f}s after the speaker stopped")
+    at = turns[-1][0]
+    heard = " ".join(t for _, t in turns)
+    print(f"AssemblyAI: {len(turns)} turn(s); last one ready {at - spoke_until:.2f}s after the speaker stopped")
     print(f"  said:  {args.text}")
     print(f"  heard: {heard}")
     norm = lambda t: "".join(c for c in t.lower() if c.isalnum() or c == " ").split()
