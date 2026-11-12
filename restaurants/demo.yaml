@@ -59,8 +59,8 @@ menu:
             min: 1
             max: 1
             options:
-              - {id: size_10, name: 10-inch, price: 0}
-              - {id: size_14, name: 14-inch, price: 5.00}
+              - {id: size_10, name: small 10-inch, price: 0}
+              - {id: size_14, name: large 14-inch, price: 5.00}
           - &pizza_crust
             id: crust
             name: Crust

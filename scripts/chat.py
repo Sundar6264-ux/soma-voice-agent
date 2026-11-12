@@ -3,6 +3,7 @@
     ./venv/bin/python scripts/chat.py            # type as the caller, Ctrl-D to hang up
     ./venv/bin/python scripts/chat.py --script   # run a fixed order end to end (the smoke test)
     ./venv/bin/python scripts/chat.py --script --model claude-opus-5-5   # same order on another model
+    ./venv/bin/python scripts/chat.py --script --at 18:00   # pretend it is 6 PM (the demo closes at night)
 
 Prints the tokens used and an estimated cost for the call at the end.
 
@@ -85,6 +86,7 @@ async def main() -> int:
     ap.add_argument("--caller-id", default="+12125550147")
     ap.add_argument("--model", help="override MODEL from .env for this run")
     ap.add_argument("--effort", help="override EFFORT from .env for this run")
+    ap.add_argument("--at", help="pretend it is this local restaurant time, e.g. 18:00 (hours checks use it)")
     args = ap.parse_args()
 
     settings = Settings.from_env()
@@ -93,7 +95,13 @@ async def main() -> int:
     call = CallInfo(call_sid=f"cli-{int(time.time())}", from_number=args.caller_id, channel="phone")
     model, effort = args.model or settings.model, args.effort or settings.effort
     llm = CountingLLM(model, effort)
-    conv = Conversation(restaurant, store, llm, call)
+    clock = None
+    if args.at:
+        from datetime import datetime, time as dtime
+        hh, mm = (int(x) for x in args.at.split(":"))
+        fixed = datetime.combine(restaurant.local_now().date(), dtime(hh, mm), tzinfo=restaurant.tz)
+        clock = lambda: fixed
+    conv = Conversation(restaurant, store, llm, call, clock=clock)
     store.start_call(call.call_sid, restaurant.id, "cli", call.from_number)
     print(f"[{model}, effort {effort}] {restaurant.name}\nagent> {restaurant.greeting}")
 

@@ -43,7 +43,7 @@ class OrderTests(unittest.TestCase):
             self.order.add("margherita", 1, ["size_10", "sauce_buffalo"])
 
     def test_option_requires_other_option(self):
-        with self.assertRaisesRegex(OrderError, "only available with 10-inch"):
+        with self.assertRaisesRegex(OrderError, "only available with small 10-inch"):
             self.order.add("margherita", 1, ["size_14", "crust_gf"])
         line = self.order.add("margherita", 1, ["crust_gf", "size_10"])
         self.assertEqual(line.option_ids, ("size_10", "crust_gf"))  # menu order, not caller order
