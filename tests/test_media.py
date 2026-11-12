@@ -14,6 +14,15 @@ from voiceagent.media import Speaker, _Utterance, split_sentences
 from voiceagent.speech import SpeechEvent
 
 from .fakes import DEMO, FakeLLM, as_plain, call, say
+
+
+class WarmableLLM(FakeLLM):
+    def __init__(self, script):
+        super().__init__(script)
+        self.warmed = 0
+
+    async def warm(self):
+        self.warmed += 1
 from .test_app_twilio import settings as base_settings
 
 TOKEN = "asterisk-test-token"
@@ -161,7 +170,7 @@ class SelfHostedCallTests(unittest.IsolatedAsyncioTestCase):
     async def make(self, script, tts=None, **overrides):
         self.port = free_port()
         self.stt = FakeSTT()
-        self.llm = FakeLLM(script)
+        self.llm = WarmableLLM(script)
         self.tts = tts or fake_tts()
         s = replace(base_settings(**overrides), asterisk_token=TOKEN, audiosocket_port=self.port)
         self.app = create_app(s, llm=self.llm, stt_factory=lambda: self.stt, synthesize=self.tts, frame_seconds=0.001)
@@ -217,6 +226,25 @@ class SelfHostedCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.stt.closed)
         # Caller ID reached the model.
         self.assertIn("+12125550100", as_plain(self.llm.requests[0])[1]["content"])
+        # Both services were warmed while the greeting played.
+        self.assertEqual(self.llm.warmed, 1)
+
+    async def test_turn_latency_is_measured_per_caller_turn(self):
+        await self.make([say("One moment."), say("Done.")])
+        call_id, ast, task = await self.start_call()
+        await eventually(lambda: len(self.tts.spoken) >= 1)
+        with self.assertLogs("voiceagent.media", level="INFO") as logs:
+            await self.stt.queue.put(SpeechEvent("turn", "Hello?", speech_end=asyncio.get_running_loop().time() - 0.3))
+            await eventually(lambda: self.app.state.audiosocket and len(self.tts.spoken) >= 2 and ast.speech_frames > 0)
+            await eventually(lambda: len(logs.output) > 0 and any("turn latency" in l for l in logs.output))
+        line = next(l for l in logs.output if "turn latency" in l)
+        for stage in ("stt=", "ttft=", "sentence=", "tts=", "play=", "total="):
+            self.assertIn(stage, line)
+        # The stt stage runs from the caller's last word (300 ms before the turn arrived) to the turn.
+        self.assertRegex(line, r"stt=(2[5-9]\d|3\d\d|4[0-4]\d) ")
+        ast.writer.write(aus.pack(aus.HANGUP))
+        await ast.writer.drain()
+        await asyncio.wait_for(task, 5)
 
     async def test_barge_in_stops_audio_and_tells_model_what_was_heard(self):
         long_reply = "We have three pizzas tonight. The Margherita is classic. The Wild Mushroom has no sauce."

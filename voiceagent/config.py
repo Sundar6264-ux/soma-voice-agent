@@ -46,6 +46,11 @@ class Settings:
     inworld_model: str = "inworld-tts-1.5-mini"
     inworld_speaking_rate: float = 1.0
     inworld_max_concurrent: int = 2   # Inworld's free tier allows only a few simultaneous requests
+    # AssemblyAI turn detection (README, "Latency"). Silence in ms before a turn may end / must end.
+    stt_min_turn_silence_ms: int = 400
+    stt_max_turn_silence_ms: int = 1280
+    stt_end_of_turn_confidence: float | None = None   # AssemblyAI default 0.4 when unset
+    stt_wait_for_formatting: bool = False              # True: the old behaviour, wait for the formatted turn
     # Testing only: "18:00" makes the agent's clock read that time today (restaurant timezone),
     # so orders can be tested outside opening hours. Empty in real use.
     demo_time: str = ""
@@ -89,5 +94,9 @@ class Settings:
             inworld_model=env("INWORLD_MODEL", "inworld-tts-1.5-mini"),
             inworld_speaking_rate=float(env("INWORLD_SPEAKING_RATE", "1.0")),
             inworld_max_concurrent=int(env("INWORLD_MAX_CONCURRENT", "2")),
+            stt_min_turn_silence_ms=int(env("STT_MIN_TURN_SILENCE_MS", "400")),
+            stt_max_turn_silence_ms=int(env("STT_MAX_TURN_SILENCE_MS", "1280")),
+            stt_end_of_turn_confidence=float(env("STT_END_OF_TURN_CONFIDENCE")) if env("STT_END_OF_TURN_CONFIDENCE") else None,
+            stt_wait_for_formatting=_flag("STT_WAIT_FOR_FORMATTING"),
             demo_time=env("DEMO_TIME", "").strip(),
         )

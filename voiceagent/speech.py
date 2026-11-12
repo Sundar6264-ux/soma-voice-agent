@@ -28,13 +28,21 @@ INWORLD_URL = "https://api.inworld.ai/tts/v1/voice:stream"
 class SpeechEvent:
     kind: str          # "speech_started", "partial" or "turn"
     text: str = ""
+    speech_end: float | None = None   # turn events: when the caller's last word ended (monotonic clock, estimated)
+
+
+# Idle TCP connections to the speech and model APIs are kept for this long. httpx closes them after
+# 5 s by default, which is shorter than the gap between two caller turns, so every turn paid a new
+# TLS handshake before its first byte.
+KEEPALIVE_SECONDS = 120.0
 
 
 class AssemblyAISTT:
     """One streaming session per call. Billed for as long as the socket is open."""
 
     def __init__(self, api_key: str, *, sample_rate: int = 8000, min_turn_silence_ms: int = 400,
-                 max_turn_silence_ms: int = 1280):
+                 max_turn_silence_ms: int = 1280, end_of_turn_confidence: float | None = None,
+                 wait_for_formatting: bool = False):
         self.api_key = api_key
         self.params = {
             "speech_model": "universal-streaming-english",
@@ -44,8 +52,18 @@ class AssemblyAISTT:
             "min_turn_silence": min_turn_silence_ms,
             "max_turn_silence": max_turn_silence_ms,
         }
+        if end_of_turn_confidence is not None:
+            self.params["end_of_turn_confidence_threshold"] = end_of_turn_confidence
+        # AssemblyAI sends each finished turn twice: first as soon as it decides the turn ended
+        # (lowercase, no punctuation), then again formatted a little later. The model copes fine
+        # with the unformatted text, so by default the first one is acted on and the second ignored.
+        self.wait_for_formatting = wait_for_formatting
         self.ws = None
         self._opened_at: float | None = None
+        self._bytes_per_ms = sample_rate * 2 / 1000
+        self._audio_ms_sent = 0.0
+        self._last_send_at: float | None = None
+        self._last_turn_order = None
         self.billed_seconds = 0.0  # session length: AssemblyAI bills from socket open to close, idle time included
 
     async def connect(self) -> None:
@@ -55,6 +73,19 @@ class AssemblyAISTT:
 
     async def send_audio(self, pcm: bytes) -> None:
         await self.ws.send(pcm)
+        self._audio_ms_sent += len(pcm) / self._bytes_per_ms
+        self._last_send_at = time.monotonic()
+
+    def _speech_end(self, msg: dict) -> float | None:
+        """When the last word of a turn ended, on this machine's monotonic clock.
+
+        Word timestamps are milliseconds into the audio stream; we know how much audio had been
+        sent at what time, so the difference places the end of speech on our clock.
+        """
+        ends = [w.get("end") for w in msg.get("words") or [] if isinstance(w, dict) and w.get("end") is not None]
+        if not ends or self._last_send_at is None:
+            return None
+        return self._last_send_at - max(0.0, self._audio_ms_sent - max(ends)) / 1000
 
     async def events(self) -> AsyncIterator[SpeechEvent]:
         async for raw in self.ws:
@@ -69,9 +100,15 @@ class AssemblyAISTT:
                 yield SpeechEvent("speech_started")
             elif kind == "Turn":
                 text = (msg.get("transcript") or "").strip()
-                if msg.get("end_of_turn") and msg.get("turn_is_formatted"):
-                    yield SpeechEvent("turn", text)
-                elif text and not msg.get("end_of_turn"):
+                if msg.get("end_of_turn"):
+                    if self.wait_for_formatting and not msg.get("turn_is_formatted"):
+                        continue
+                    order = msg.get("turn_order")
+                    if order is not None and order == self._last_turn_order:
+                        continue  # the formatted copy of a turn already acted on
+                    self._last_turn_order = order
+                    yield SpeechEvent("turn", text, speech_end=self._speech_end(msg))
+                elif text:
                     yield SpeechEvent("partial", text)
             elif kind == "Termination":
                 self.billed_seconds = max(self.billed_seconds, float(msg.get("session_duration_seconds") or 0))
@@ -106,10 +143,18 @@ class InworldTTS:
         self.voice = voice
         self.model = model
         self.speaking_rate = speaking_rate
-        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0))
+        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0),
+                                                  limits=httpx.Limits(keepalive_expiry=KEEPALIVE_SECONDS))
         self.max_concurrent = max_concurrent
         self.retry_delays = tuple(retry_delays)
         self._slots: asyncio.Semaphore | None = None
+
+    async def warm(self) -> None:
+        """Open the TLS connection to Inworld before the first sentence needs it (free: no synthesis)."""
+        try:
+            await self.client.get(INWORLD_URL, headers={"Authorization": f"Basic {self.api_key}"})
+        except Exception as exc:  # a failed warm-up changes nothing: the first sentence connects as before
+            log.debug("Inworld warm-up failed: %r", exc)
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Yield raw 8 kHz PCM chunks as Inworld generates them."""

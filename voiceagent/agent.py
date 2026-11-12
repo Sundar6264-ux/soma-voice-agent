@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncIterator, Callable
@@ -48,10 +49,24 @@ def _attr(block, name, default=None):
 class AnthropicLLM:
     """Streams one model turn. `stream()` yields an object with `text()` and `final()`."""
 
-    def __init__(self, model: str, effort: str, client: anthropic.AsyncAnthropic | None = None):
+    def __init__(self, model: str, effort: str, client: anthropic.AsyncAnthropic | None = None,
+                 keepalive_seconds: float = 120.0):
         self.model = model
         self.effort = effort
-        self.client = client or anthropic.AsyncAnthropic()
+        if client is None:
+            import httpx2
+            # Keep the TLS connection between caller turns (the SDK's default drops it after 5 s idle).
+            http = anthropic.DefaultAsyncHttpxClient(limits=httpx2.Limits(
+                max_connections=1000, max_keepalive_connections=100, keepalive_expiry=keepalive_seconds))
+            client = anthropic.AsyncAnthropic(http_client=http)
+        self.client = client
+
+    async def warm(self) -> None:
+        """Open the connection to the API while the greeting plays (a free GET, no tokens)."""
+        try:
+            await self.client.models.retrieve(self.model)
+        except Exception as exc:  # the first real request simply connects as before
+            log.debug("Anthropic warm-up failed: %r", exc)
 
     @asynccontextmanager
     async def stream(self, system: str, tools: list[dict], messages: list[dict]):
@@ -73,9 +88,12 @@ class AnthropicLLM:
 class _AnthropicTurn:
     def __init__(self, stream):
         self._stream = stream
+        self.first_event_at: float | None = None  # first stream event of any kind (thinking included)
 
     async def text(self) -> AsyncIterator[str]:
         async for event in self._stream:
+            if self.first_event_at is None:
+                self.first_event_at = time.monotonic()
             if event.type == "text":
                 yield event.text
 
@@ -96,6 +114,12 @@ class Conversation:
         self.transcript: list[dict] = []
         self._notes: list[str] = []
         self._context_sent = False
+        # Optional latency hook: called with "llm_sent", "llm_first_event", "llm_first_token" (see media.py).
+        self.on_timing: Callable[[str], None] | None = None
+
+    def _mark(self, name: str) -> None:
+        if self.on_timing:
+            self.on_timing(name)
 
     # -- caller side -------------------------------------------------------
 
@@ -137,11 +161,15 @@ class Conversation:
         while rounds < MAX_ROUNDS:
             round_text: list[str] = []
             try:
+                self._mark("llm_sent")
                 async with self.llm.stream(self.system, TOOLS, self.messages) as turn:
                     async for chunk in turn.text():
+                        if getattr(turn, "first_event_at", None) and not round_text:
+                            self._mark("llm_first_event")
                         chunk = _UNSPEAKABLE.sub("", chunk)
                         if not chunk:
                             continue
+                        self._mark("llm_first_token")
                         if not round_text and spoken_any and not chunk[0].isspace():
                             chunk = " " + chunk
                         round_text.append(chunk)

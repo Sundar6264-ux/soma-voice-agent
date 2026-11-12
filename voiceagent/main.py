@@ -1,6 +1,7 @@
 """FastAPI app: Twilio webhooks, the relay WebSocket, the kitchen board, the browser test call."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -52,17 +53,29 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     def make_stt():
         if stt_factory:
             return stt_factory()
-        return AssemblyAISTT(settings.assemblyai_api_key)
+        return AssemblyAISTT(settings.assemblyai_api_key, min_turn_silence_ms=settings.stt_min_turn_silence_ms,
+                             max_turn_silence_ms=settings.stt_max_turn_silence_ms,
+                             end_of_turn_confidence=settings.stt_end_of_turn_confidence,
+                             wait_for_formatting=settings.stt_wait_for_formatting)
 
-    tts_holder = {"synth": synthesize}
+    tts_holder = {"synth": synthesize, "tts": None}
 
     def get_synth():
         if tts_holder["synth"] is None:
             tts = InworldTTS(settings.inworld_api_key, voice=settings.inworld_voice, model=settings.inworld_model,
                              speaking_rate=settings.inworld_speaking_rate,
                              max_concurrent=settings.inworld_max_concurrent)
+            tts_holder["tts"] = tts
             tts_holder["synth"] = tts.synthesize
         return tts_holder["synth"]
+
+    def warm_services() -> None:
+        """Open the Anthropic and Inworld connections while the greeting plays, so the first reply
+        does not pay two TLS handshakes. Fire and forget; failures are harmless."""
+        for svc in (get_llm(), tts_holder["tts"]):
+            warm = getattr(svc, "warm", None)
+            if warm:
+                asyncio.create_task(warm())
 
     async def start_media_call(call_id: str, reader, writer) -> None:
         entry = pending_calls.pop(call_id, None)
@@ -76,6 +89,7 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
             stt = make_stt()
             call = MediaCall(reader, writer, call_id=call_id, from_number=entry[0], greeting=restaurant.greeting,
                              stt=stt, synthesize=get_synth(), make_relay=make_relay, **kwargs)
+            warm_services()
             try:
                 action = await call.run()
             finally:
