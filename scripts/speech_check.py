@@ -94,6 +94,8 @@ async def main() -> int:
     except asyncio.TimeoutError:
         pass
     await stt.close()
+    from voiceagent.store import Store
+    Store(s.db_path).record_stt("speech-check", stt.billed_seconds)
     if not turns:
         print("FAIL: AssemblyAI returned no finished turn")
         return 1

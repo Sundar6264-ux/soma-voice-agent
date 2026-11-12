@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator
 from urllib.parse import urlencode
@@ -43,8 +44,11 @@ class AssemblyAISTT:
             "max_turn_silence": max_turn_silence_ms,
         }
         self.ws = None
+        self._opened_at: float | None = None
+        self.billed_seconds = 0.0  # session length: AssemblyAI bills from socket open to close, idle time included
 
     async def connect(self) -> None:
+        self._opened_at = time.monotonic()
         self.ws = await websockets.connect(f"{ASSEMBLYAI_URL}?{urlencode(self.params)}",
                                            additional_headers={"Authorization": self.api_key})
 
@@ -69,10 +73,13 @@ class AssemblyAISTT:
                 elif text and not msg.get("end_of_turn"):
                     yield SpeechEvent("partial", text)
             elif kind == "Termination":
+                self.billed_seconds = max(self.billed_seconds, float(msg.get("session_duration_seconds") or 0))
                 log.info("AssemblyAI session ended: %.0fs audio", msg.get("audio_duration_seconds") or 0)
                 return
 
     async def close(self) -> None:
+        if self._opened_at is not None:
+            self.billed_seconds = max(self.billed_seconds, time.monotonic() - self._opened_at)
         if self.ws is None:
             return
         try:

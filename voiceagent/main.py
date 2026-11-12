@@ -72,9 +72,13 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
             make_relay = lambda send, sleep: RelaySession(send, make_conversation, store, restaurant.id,
                                                           channel="phone", sleep=sleep)
             kwargs = {"frame_seconds": frame_seconds} if frame_seconds else {}
+            stt = make_stt()
             call = MediaCall(reader, writer, call_id=call_id, from_number=entry[0], greeting=restaurant.greeting,
-                             stt=make_stt(), synthesize=get_synth(), make_relay=make_relay, **kwargs)
-            action = await call.run()
+                             stt=stt, synthesize=get_synth(), make_relay=make_relay, **kwargs)
+            try:
+                action = await call.run()
+            finally:
+                store.record_stt(call_id, getattr(stt, "billed_seconds", 0.0))
         finally:
             sessions["live"] -= 1
         now = time.monotonic()

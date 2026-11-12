@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS orders_created ON orders(created_at);
+CREATE TABLE IF NOT EXISTS stt_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_sid TEXT,
+    seconds REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS calls (
     call_sid TEXT PRIMARY KEY,
     restaurant_id TEXT NOT NULL,
@@ -103,6 +109,15 @@ class Store:
             "UPDATE calls SET ended_at = ?, outcome = ?, order_id = ?, transcript_json = ? WHERE call_sid = ?",
             (utcnow(), outcome, order_id, json.dumps(transcript), call_sid),
         )
+
+    def record_stt(self, call_sid: str, seconds: float) -> None:
+        if seconds > 0:
+            self._write("INSERT INTO stt_usage (call_sid, seconds, created_at) VALUES (?,?,?)",
+                        (call_sid, round(seconds, 2), utcnow()))
+
+    def stt_seconds(self) -> float:
+        with self._conn() as conn:
+            return float(conn.execute("SELECT COALESCE(SUM(seconds), 0) FROM stt_usage").fetchone()[0])
 
     def recent_calls(self, restaurant_id: str, limit: int = 30) -> list[dict]:
         with self._conn() as conn:
