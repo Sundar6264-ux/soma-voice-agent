@@ -95,11 +95,12 @@ class RelaySession:
             self.conv.interrupted(heard if heard is not None else " ".join(self._sent))
 
     async def _dtmf(self, digit: str) -> None:
-        if digit == "0" and not self.ending and self.conv.restaurant.staff_phone:
+        persona = self.conv.persona
+        if digit == "0" and not self.ending and persona.staff_phone:
             await self._cancel_reply()
             self.conv.toolbox.control = Control("transfer", "caller pressed 0")
-            await self._say("Connecting you with someone at the restaurant now.")
-            self._schedule_finish("Connecting you with someone at the restaurant now.")
+            await self._say(persona.dtmf_transfer_line)
+            self._schedule_finish(persona.dtmf_transfer_line)
 
     async def _cancel_reply(self) -> None:
         task = self.reply_task
@@ -124,7 +125,7 @@ class RelaySession:
             raise
         except Exception:
             log.exception("reply failed on %s", self.conv.call.call_sid)
-            await self._say("Sorry, something went wrong on my end. Please call back in a few minutes.")
+            await self._say(self.conv.persona.trouble_line)
             self.conv.toolbox.control = self.conv.toolbox.control or Control("end", "internal error")
         if self.conv.toolbox.control:
             self._schedule_finish("".join(self._sent))
@@ -138,7 +139,7 @@ class RelaySession:
         await self.sleep(speech_seconds(last_text))
         control = self.conv.toolbox.control
         handoff = {"reasonCode": control.action, "reason": control.reason,
-                   "orderId": self.conv.toolbox.placed_order_id}
+                   "orderId": getattr(self.conv.toolbox, "placed_order_id", None)}
         await self.send({"type": "end", "handoffData": json.dumps(handoff)})
 
     async def close(self) -> None:
@@ -150,5 +151,5 @@ class RelaySession:
             self.finish_task.cancel()
         if self.conv is not None:
             self.store.end_call(self.conv.call.call_sid, self.conv.outcome(),
-                                self.conv.toolbox.placed_order_id, self.conv.transcript)
+                                getattr(self.conv.toolbox, "placed_order_id", None), self.conv.transcript)
             log.info("call %s ended: %s", self.conv.call.call_sid, self.conv.outcome())

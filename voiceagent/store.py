@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS stt_usage (
     seconds REAL NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_sid TEXT,
+    name TEXT NOT NULL,
+    company TEXT NOT NULL,
+    contact TEXT NOT NULL,
+    role TEXT,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS calls (
     call_sid TEXT PRIMARY KEY,
     restaurant_id TEXT NOT NULL,
@@ -109,6 +119,17 @@ class Store:
             "UPDATE calls SET ended_at = ?, outcome = ?, order_id = ?, transcript_json = ? WHERE call_sid = ?",
             (utcnow(), outcome, order_id, json.dumps(transcript), call_sid),
         )
+
+    def save_message(self, *, call_sid: str, name: str, company: str, contact: str, message: str, role: str = "") -> int:
+        return self._write(
+            "INSERT INTO messages (call_sid, name, company, contact, role, message, created_at) VALUES (?,?,?,?,?,?,?)",
+            (call_sid, name, company, contact, role, message, utcnow()),
+        )
+
+    def recent_messages(self, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
     def record_stt(self, call_sid: str, seconds: float) -> None:
         if seconds > 0:

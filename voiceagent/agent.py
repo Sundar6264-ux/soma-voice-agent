@@ -23,6 +23,7 @@ from typing import AsyncIterator, Callable
 import anthropic
 
 from .menu import Restaurant
+from .persona import Persona
 from .prompts import build_system_prompt, call_context
 from .store import Store
 from .tools import TOOLS, CallInfo, Control, ToolBox
@@ -101,27 +102,60 @@ class _AnthropicTurn:
         return await self._stream.get_final_message()
 
 
+def restaurant_persona(restaurant: Restaurant, store: Store, clock: Callable[[], datetime] | None = None,
+                       system_prompt: str | None = None) -> Persona:
+    """The default persona: the phone ordering agent, exactly as before personas existed."""
+    kwargs = {"clock": clock} if clock else {}
+    return Persona(
+        id=restaurant.id,
+        system_prompt=system_prompt or build_system_prompt(restaurant),
+        tools=TOOLS,
+        make_toolbox=lambda call: ToolBox(restaurant, store, call, **kwargs),
+        greeting=restaurant.greeting,
+        call_context=call_context,
+        trouble_line=SORRY_TROUBLE + (" Let me connect you with someone at the restaurant." if restaurant.staff_phone
+                                      else " Please call back in a few minutes."),
+        refusal_line="Sorry, I can't help with that. Is there anything else I can get for your order?",
+        transfer_line=TRANSFER_LINE,
+        staff_phone=restaurant.staff_phone,
+        dtmf_transfer_line="Connecting you with someone at the restaurant now.",
+        restaurant=restaurant,
+    )
+
+
 class Conversation:
-    def __init__(self, restaurant: Restaurant, store: Store, llm, call: CallInfo,
-                 clock: Callable[[], datetime] | None = None, system_prompt: str | None = None):
-        self.restaurant = restaurant
+    def __init__(self, restaurant: Restaurant | None, store: Store, llm, call: CallInfo,
+                 clock: Callable[[], datetime] | None = None, system_prompt: str | None = None,
+                 persona: Persona | None = None):
+        if persona is None:
+            persona = restaurant_persona(restaurant, store, clock, system_prompt)
+        self.persona = persona
+        self.restaurant = persona.restaurant
         self.llm = llm
         self.call = call
-        self.system = system_prompt or build_system_prompt(restaurant)
-        kwargs = {"clock": clock} if clock else {}
-        self.toolbox = ToolBox(restaurant, store, call, **kwargs)
+        self.system = persona.system_prompt
+        self.tools = persona.tools
+        self.toolbox = persona.make_toolbox(call)
         self.messages: list[dict] = []
         self.transcript: list[dict] = []
+        if hasattr(self.toolbox, "transcript"):   # a toolbox that emails or shows the conversation so far
+            self.toolbox.transcript = self.transcript
         self._notes: list[str] = []
         self._context_sent = False
         # Optional latency hook: called with "llm_sent", "llm_first_event", "llm_first_token" (see media.py).
         self.on_timing: Callable[[str], None] | None = None
+        # Optional event hook: tool-raised events for the caller's client (links, for example). See media.py.
+        self.on_event: Callable[[dict], None] | None = None
 
     def _mark(self, name: str) -> None:
         if self.on_timing:
             self.on_timing(name)
 
     # -- caller side -------------------------------------------------------
+
+    def add_note(self, text: str) -> None:
+        """A bracketed note the model sees with the caller's next turn (append-only: never edits history)."""
+        self._notes.append(text)
 
     def caller_said(self, text: str) -> None:
         text = text.strip() or "(silence or unintelligible audio)"
@@ -140,7 +174,7 @@ class Conversation:
             return
         self.messages.append({"role": "user", "content": blocks})
         if not self._context_sent:
-            self.messages.append({"role": "system", "content": call_context(self.call.from_number, self.call.channel)})
+            self.messages.append({"role": "system", "content": self.persona.call_context(self.call.from_number, self.call.channel)})
             self._context_sent = True
 
     def interrupted(self, heard: str) -> None:
@@ -162,7 +196,7 @@ class Conversation:
             round_text: list[str] = []
             try:
                 self._mark("llm_sent")
-                async with self.llm.stream(self.system, TOOLS, self.messages) as turn:
+                async with self.llm.stream(self.system, self.tools, self.messages) as turn:
                     async for chunk in turn.text():
                         if getattr(turn, "first_event_at", None) and not round_text:
                             self._mark("llm_first_event")
@@ -197,7 +231,7 @@ class Conversation:
             tool_uses = [b for b in _attr(msg, "content", []) if _attr(b, "type") == "tool_use"]
             if stop == "refusal":
                 log.warning("refusal on %s: %r", self.call.call_sid, _attr(msg, "stop_details"))
-                yield (" " if spoken_any else "") + "Sorry, I can't help with that. Is there anything else I can get for your order?"
+                yield (" " if spoken_any else "") + self.persona.refusal_line
                 return
             if stop == "max_tokens":
                 log.error("max_tokens on %s", self.call.call_sid)
@@ -220,27 +254,22 @@ class Conversation:
                                 "content": result.content, "is_error": result.is_error})
             self.messages.append({"role": "assistant", "content": _attr(msg, "content")})
             self.messages.append({"role": "user", "content": results})
+            for event in getattr(self.toolbox, "take_events", lambda: [])():
+                if self.on_event:
+                    self.on_event(event)
 
             control = self.toolbox.control
             if control:
-                if control.action == "transfer":
-                    yield (" " if spoken_any else "") + TRANSFER_LINE
+                if control.action == "transfer" and self.persona.transfer_line:
+                    yield (" " if spoken_any else "") + self.persona.transfer_line
                 return
         log.error("tool loop hit %d rounds on %s", MAX_ROUNDS, self.call.call_sid)
         yield (" " if spoken_any else "") + self._trouble_line()
 
     def _trouble_line(self) -> str:
-        if self.restaurant.staff_phone:
+        if self.persona.staff_phone:
             self.toolbox.control = self.toolbox.control or Control("transfer", "agent error")
-            return SORRY_TROUBLE + " Let me connect you with someone at the restaurant."
-        return SORRY_TROUBLE + " Please call back in a few minutes."
+        return self.persona.trouble_line
 
     def outcome(self) -> str:
-        if self.toolbox.placed_order_id is not None:
-            return "order_placed"
-        control = self.toolbox.control
-        if control and control.action == "transfer":
-            return "transferred"
-        if self.toolbox.callback_reason:
-            return "callback_requested"
-        return "no_order"
+        return self.toolbox.outcome()

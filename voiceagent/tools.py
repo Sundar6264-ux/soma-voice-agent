@@ -79,9 +79,16 @@ _SCHEMAS = {t["name"]: t["input_schema"] for t in TOOLS}
 _TYPES = {"string": str, "integer": int, "array": list, "object": dict}
 
 
-def validate_input(name: str, args) -> str | None:
-    """Return an error message, or None when args match the tool's schema."""
-    schema = _SCHEMAS.get(name)
+def schemas_of(tools: list[dict]) -> dict[str, dict]:
+    return {t["name"]: t["input_schema"] for t in tools}
+
+
+def validate_input(name: str, args, schemas: dict[str, dict] | None = None) -> str | None:
+    """Return an error message, or None when args match the tool's schema.
+
+    `schemas` defaults to the restaurant tools; other personas pass schemas_of(their TOOLS).
+    """
+    schema = (schemas if schemas is not None else _SCHEMAS).get(name)
     if schema is None:
         return f"unknown tool {name!r}"
     if not isinstance(args, dict):
@@ -219,3 +226,12 @@ class ToolBox:
     def _t_end_call(self) -> dict:
         self.control = Control("end")
         return {"ended": True}
+
+    def outcome(self) -> str:
+        if self.placed_order_id is not None:
+            return "order_placed"
+        if self.control and self.control.action == "transfer":
+            return "transferred"
+        if self.callback_reason:
+            return "callback_requested"
+        return "no_order"

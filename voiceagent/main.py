@@ -16,31 +16,36 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import twilio
+from . import profile, twilio
 from .agent import AnthropicLLM, Conversation
 from .config import Settings
-from .media import AudioSocketServer, MediaCall
+from .media import AudioSocketServer, AudioSocketTransport, MediaCall, WebSocketTransport
 from .menu import load_restaurant
 from .prompts import build_system_prompt
 from .relay import RelaySession
-from .speech import AssemblyAISTT, InworldTTS
+from .speech import AssemblyAISTT, InworldTTS, with_fallback_voice
 from .store import ORDER_STATUSES, Store
 
 log = logging.getLogger(__name__)
 PAGES = Path(__file__).parent / "pages"
+STATIC = Path(__file__).parent / "static"
 ADMIN_COOKIE = "rva_admin"
+PROFILE_WARN_BEFORE_END_S = 60
 
 
 PENDING_TTL_SECONDS = 60
 
 
 def create_app(settings: Settings | None = None, llm=None, stt_factory=None, synthesize=None,
-               frame_seconds: float | None = None) -> FastAPI:
+               frame_seconds: float | None = None, mailer=None, resume_text: str | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     restaurant = load_restaurant(settings.restaurant_file)
     store = Store(settings.db_path)
     system_prompt = build_system_prompt(restaurant)
-    sessions = {"live": 0}
+    # "Soma's AI": the resume is read once here, never modified, and lives in the cached system prompt.
+    persona = profile.make_persona(store, resume_text if resume_text is not None else profile.load_resume(settings.profile_resume_path),
+                                   message_email=settings.message_email, mailer=mailer)
+    sessions = {"live": 0, "talk": 0}
     llm_holder = {"llm": llm}
     has_credentials = llm is not None or bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if not has_credentials:
@@ -50,29 +55,45 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     pending_calls: dict[str, tuple[str, float]] = {}   # call id -> (caller number, registered at)
     call_results: dict[str, tuple[str, float]] = {}    # call id -> ("hangup" | "transfer", finished at)
 
-    def make_stt():
+    def make_stt(sample_rate: int = 8000):
         if stt_factory:
             return stt_factory()
-        return AssemblyAISTT(settings.assemblyai_api_key, min_turn_silence_ms=settings.stt_min_turn_silence_ms,
+        return AssemblyAISTT(settings.assemblyai_api_key, sample_rate=sample_rate,
+                             min_turn_silence_ms=settings.stt_min_turn_silence_ms,
                              max_turn_silence_ms=settings.stt_max_turn_silence_ms,
                              end_of_turn_confidence=settings.stt_end_of_turn_confidence,
                              wait_for_formatting=settings.stt_wait_for_formatting)
 
-    tts_holder = {"synth": synthesize, "tts": None}
+    tts_holder = {"synth": synthesize, "tts": None, "profile_synth": None}
+
+    def get_tts():
+        if tts_holder["tts"] is None and synthesize is None:
+            tts_holder["tts"] = InworldTTS(settings.inworld_api_key, voice=settings.inworld_voice, model=settings.inworld_model,
+                                           speaking_rate=settings.inworld_speaking_rate,
+                                           max_concurrent=settings.inworld_max_concurrent)
+        return tts_holder["tts"]
 
     def get_synth():
+        """The phone voice: 8 kHz in the stock voice."""
         if tts_holder["synth"] is None:
-            tts = InworldTTS(settings.inworld_api_key, voice=settings.inworld_voice, model=settings.inworld_model,
-                             speaking_rate=settings.inworld_speaking_rate,
-                             max_concurrent=settings.inworld_max_concurrent)
-            tts_holder["tts"] = tts
-            tts_holder["synth"] = tts.synthesize
+            tts_holder["synth"] = get_tts().synthesize
         return tts_holder["synth"]
+
+    def get_profile_synth():
+        """The browser voice: 24 kHz in the cloned voice, falling back to the stock voice per sentence."""
+        if tts_holder["profile_synth"] is None:
+            if synthesize is not None:   # tests: the fake ignores rate and voice
+                tts_holder["profile_synth"] = synthesize
+            else:
+                tts_holder["profile_synth"] = with_fallback_voice(
+                    get_tts().synthesize, voice=settings.profile_inworld_voice or settings.inworld_voice,
+                    fallback=settings.inworld_voice, sample_rate=WebSocketTransport.out_rate)
+        return tts_holder["profile_synth"]
 
     def warm_services() -> None:
         """Open the Anthropic and Inworld connections while the greeting plays, so the first reply
         does not pay two TLS handshakes. Fire and forget; failures are harmless."""
-        for svc in (get_llm(), tts_holder["tts"]):
+        for svc in (get_llm(), get_tts()):
             warm = getattr(svc, "warm", None)
             if warm:
                 asyncio.create_task(warm())
@@ -87,8 +108,8 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
                                                           channel="phone", sleep=sleep)
             kwargs = {"frame_seconds": frame_seconds} if frame_seconds else {}
             stt = make_stt()
-            call = MediaCall(reader, writer, call_id=call_id, from_number=entry[0], greeting=restaurant.greeting,
-                             stt=stt, synthesize=get_synth(), make_relay=make_relay, **kwargs)
+            call = MediaCall(AudioSocketTransport(reader, writer), call_id=call_id, from_number=entry[0],
+                             greeting=restaurant.greeting, stt=stt, synthesize=get_synth(), make_relay=make_relay, **kwargs)
             warm_services()
             try:
                 action = await call.run()
@@ -164,6 +185,9 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     def make_conversation(call):
         return Conversation(restaurant, store, get_llm(), call, clock=demo_clock, system_prompt=system_prompt)
 
+    def make_profile_conversation(call):
+        return Conversation(None, store, get_llm(), call, persona=persona)
+
     # -- admin auth (board, browser test call) ----------------------------
 
     def admin_cookie_value() -> str:
@@ -180,7 +204,7 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     async def login(key: str = "", next: str = "/board"):
         if not settings.admin_key or not hmac.compare_digest(key, settings.admin_key):
             raise HTTPException(status_code=401, detail="wrong or missing key")
-        target = next if next in {"/board", "/try"} else "/board"
+        target = next if next in {"/board", "/try", "/talk"} else "/board"
         resp = RedirectResponse(target, status_code=303)
         resp.set_cookie(ADMIN_COOKIE, admin_cookie_value(), httponly=True, samesite="strict",
                         secure=settings.public_base_url.startswith("https://"), max_age=30 * 86400)
@@ -192,7 +216,8 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
                 "twilio_signing": bool(settings.twilio_auth_token) and not settings.allow_unsigned_twilio,
                 "selfhost_calls": settings.selfhost_enabled, "demo_time": settings.demo_time or None,
                 "assemblyai_key": bool(settings.assemblyai_api_key), "inworld_key": bool(settings.inworld_api_key),
-                "live_sessions": sessions["live"]}
+                "live_sessions": sessions["live"], "talk_sessions": sessions["talk"],
+                "profile_voice": settings.profile_inworld_voice or settings.inworld_voice, "message_email": settings.message_email}
 
     # -- Twilio ------------------------------------------------------------
 
@@ -287,6 +312,62 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
         if not is_admin(request.cookies):
             return RedirectResponse("/login-required", status_code=303)
         return FileResponse(PAGES / "try.html")
+
+    # -- Soma's AI: browser voice conversation over our own audio pipeline ----
+
+    @app.websocket("/talk")
+    async def talk_ws(websocket: WebSocket):
+        if not is_admin(websocket.cookies):
+            await websocket.close(code=4401)
+            return
+        if sessions["talk"] >= 1 or sessions["live"] >= settings.max_sessions:
+            # One browser conversation at a time: the cloned voice runs on Inworld's free-tier concurrency.
+            await websocket.accept()
+            await websocket.send_json({"type": "busy", "text": "Soma's AI is talking with someone else right now. Please try again shortly."})
+            await websocket.close(code=4429)
+            return
+        await websocket.accept()
+        sessions["talk"] += 1
+        sessions["live"] += 1
+        call_id = "web-" + secrets.token_hex(6)
+        try:
+            transport = WebSocketTransport(websocket)
+            stt = make_stt(transport.in_rate)
+            make_relay = lambda send, sleep: RelaySession(send, make_profile_conversation, store, persona.id,
+                                                          channel="web", sleep=sleep)
+            kwargs = {"frame_seconds": frame_seconds} if frame_seconds else {}
+            limit = settings.profile_time_limit_s
+            call = MediaCall(transport, call_id=call_id, from_number="", greeting=persona.greeting, stt=stt,
+                             synthesize=get_profile_synth(), make_relay=make_relay, time_limit=limit,
+                             warn_at=max(0, limit - PROFILE_WARN_BEFORE_END_S), **kwargs)
+            warm_services()
+            try:
+                await call.run()
+            finally:
+                store.record_stt(call_id, getattr(stt, "billed_seconds", 0.0))
+        except Exception:
+            log.exception("talk session %s failed", call_id)
+        finally:
+            sessions["talk"] -= 1
+            sessions["live"] -= 1
+
+    @app.get("/talk")
+    async def talk_page(request: Request):
+        if not is_admin(request.cookies):
+            return RedirectResponse("/login-required", status_code=303)
+        return FileResponse(PAGES / "talk.html")
+
+    @app.get("/static/{name}")
+    async def static_file(name: str):
+        path = STATIC / name
+        if "/" in name or not path.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/messages")
+    async def api_messages(request: Request):
+        require_admin(request)
+        return {"messages": store.recent_messages()}
 
     # -- kitchen board -----------------------------------------------------
 

@@ -156,15 +156,15 @@ class InworldTTS:
         except Exception as exc:  # a failed warm-up changes nothing: the first sentence connects as before
             log.debug("Inworld warm-up failed: %r", exc)
 
-    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        """Yield raw 8 kHz PCM chunks as Inworld generates them."""
+    async def synthesize(self, text: str, *, sample_rate: int = 8000, voice: str | None = None) -> AsyncIterator[bytes]:
+        """Yield raw PCM chunks at `sample_rate` as Inworld generates them, in `voice` (default: self.voice)."""
         if self._slots is None:
             self._slots = asyncio.Semaphore(self.max_concurrent)
         body = {
             "text": text,
-            "voiceId": self.voice,
+            "voiceId": voice or self.voice,
             "modelId": self.model,
-            "audioConfig": {"audioEncoding": "PCM", "sampleRateHertz": 8000, "speakingRate": self.speaking_rate},
+            "audioConfig": {"audioEncoding": "PCM", "sampleRateHertz": sample_rate, "speakingRate": self.speaking_rate},
         }
         headers = {"Authorization": f"Basic {self.api_key}", "Content-Type": "application/json"}
         async with self._slots:
@@ -188,3 +188,24 @@ class InworldTTS:
                         if audio:
                             yield base64.b64decode(audio)
                     return
+
+
+def with_fallback_voice(synthesize, *, voice: str, fallback: str, sample_rate: int):
+    """A synthesize(text) for one persona: `voice` first, and if synthesis fails before any audio arrived
+    (a cloned voice can be rejected or rate limited), the same sentence once more in `fallback`."""
+    async def run(text: str) -> AsyncIterator[bytes]:
+        started = False
+        try:
+            async for chunk in synthesize(text, sample_rate=sample_rate, voice=voice):
+                started = True
+                yield chunk
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if started or voice == fallback:
+                raise
+            log.warning("voice %r failed (%r); retrying the sentence with %r", voice, exc, fallback)
+        async for chunk in synthesize(text, sample_rate=sample_rate, voice=fallback):
+            yield chunk
+    return run

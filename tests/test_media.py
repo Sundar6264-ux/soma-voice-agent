@@ -39,9 +39,10 @@ class FakeSTT:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.audio = bytearray()
         self.closed = False
+        self.loop = None
 
     async def connect(self):
-        pass
+        self.loop = asyncio.get_running_loop()
 
     async def send_audio(self, pcm):
         self.audio.extend(pcm)
@@ -141,7 +142,7 @@ class SpeakerTests(unittest.IsolatedAsyncioTestCase):
         written = []
 
         async def write(frame):
-            written.append(frame[3:])
+            written.append(frame)  # raw PCM; the transport adds the AudioSocket header
 
         speaker = Speaker(write, fake_tts(), frame_seconds=0.001)
         task = asyncio.create_task(speaker.run())

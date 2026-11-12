@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soma's AI</title>
+<style>
+  :root { --bg:#0f1216; --card:#1a1f26; --line:#2a313b; --text:#e8ecf1; --muted:#98a3af; --accent:#5fb3ff; --warn:#f2a33a; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  .wrap { max-width:680px; margin:0 auto; padding:16px; display:flex; flex-direction:column; min-height:100%; gap:12px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  h1 { font-size:20px; margin:0; }
+  #clock { font-variant-numeric:tabular-nums; color:var(--muted); font-size:15px; }
+  #clock.low { color:var(--warn); }
+  .notice { color:var(--muted); font-size:13px; margin:0; }
+  #captions { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; flex:1; min-height:220px; max-height:55vh; overflow-y:auto; }
+  .msg { margin:8px 0; }
+  .who { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  .caller .text { color:var(--accent); }
+  .sys { color:var(--muted); font-style:italic; font-size:13px; }
+  #links { display:none; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  #links.show { display:block; }
+  #links a { display:block; color:var(--accent); padding:6px 0; word-break:break-all; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { background:#242c36; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:12px 18px; font:inherit; font-size:17px; cursor:pointer; min-width:120px; }
+  button.live { border-color:#e35d5d; color:#ffb3b3; }
+  button:disabled { opacity:.6; cursor:default; }
+  #state { color:var(--muted); font-size:14px; }
+  form { display:flex; gap:8px; }
+  input { flex:1; min-width:0; background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px; font:inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Talk to Soma's AI</h1><span id="clock">10:00</span></header>
+  <p class="notice">AI assistant in a voice cloned from Soma's. Conversations are logged so Soma can review them.</p>
+  <div id="captions" aria-live="polite"></div>
+  <div id="links"><div class="who">Links</div></div>
+  <div class="row">
+    <button id="start">Start</button>
+    <span id="state">Press Start and allow the microphone.</span>
+  </div>
+  <form id="typed" hidden><input id="typed-text" autocomplete="off" placeholder="Or type a question"><button type="submit">Send</button></form>
+  <p class="notice">Up to ten minutes per conversation. Say "take a message" to leave one for Soma. <span id="stats"></span></p>
+</div>
+<script src="/static/talk.js"></script>
+</body>
+</html>

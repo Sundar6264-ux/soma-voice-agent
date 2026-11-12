@@ -54,6 +54,12 @@ class Settings:
     # Testing only: "18:00" makes the agent's clock read that time today (restaurant timezone),
     # so orders can be tested outside opening hours. Empty in real use.
     demo_time: str = ""
+    # "Soma's AI" browser persona (voiceagent/profile.py, README "Soma's AI").
+    profile_resume_path: str = "/home/sundar/career-central/resumes/master-resume.md"
+    profile_inworld_voice: str = ""          # empty: the same voice as the phone path
+    profile_time_limit_s: int = 600
+    # Messages taken by take_message: "on" emails them, "test" emails with a [TEST] subject, "off" only logs.
+    message_email: str = "off"
 
     @property
     def selfhost_enabled(self) -> bool:
@@ -99,4 +105,8 @@ class Settings:
             stt_end_of_turn_confidence=float(env("STT_END_OF_TURN_CONFIDENCE")) if env("STT_END_OF_TURN_CONFIDENCE") else None,
             stt_wait_for_formatting=_flag("STT_WAIT_FOR_FORMATTING"),
             demo_time=env("DEMO_TIME", "").strip(),
+            profile_resume_path=env("PROFILE_RESUME_PATH", "/home/sundar/career-central/resumes/master-resume.md"),
+            profile_inworld_voice=env("PROFILE_INWORLD_VOICE", ""),
+            profile_time_limit_s=int(env("PROFILE_TIME_LIMIT_S", "600")),
+            message_email=env("MESSAGE_EMAIL", "off").strip().lower() or "off",
         )
