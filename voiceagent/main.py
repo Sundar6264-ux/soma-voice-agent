@@ -134,8 +134,20 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
             llm_holder["llm"] = AnthropicLLM(settings.model, settings.effort)
         return llm_holder["llm"]
 
+    demo_clock = None
+    if settings.demo_time:
+        from datetime import datetime as _dt, time as _time
+        try:
+            hh, mm = (int(x) for x in settings.demo_time.split(":"))
+            demo_at = _time(hh, mm)
+        except ValueError:
+            raise SystemExit(f"DEMO_TIME must be HH:MM, got {settings.demo_time!r}")
+        demo_clock = lambda: _dt.combine(restaurant.local_now().date(), demo_at, tzinfo=restaurant.tz)
+        log.warning("DEMO_TIME=%s: the agent's clock is fixed for testing; remove it before real use",
+                    settings.demo_time)
+
     def make_conversation(call):
-        return Conversation(restaurant, store, get_llm(), call, system_prompt=system_prompt)
+        return Conversation(restaurant, store, get_llm(), call, clock=demo_clock, system_prompt=system_prompt)
 
     # -- admin auth (board, browser test call) ----------------------------
 
@@ -163,7 +175,7 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
     async def healthz():
         return {"ok": True, "restaurant": restaurant.id, "model": settings.model, "claude_credentials": has_credentials,
                 "twilio_signing": bool(settings.twilio_auth_token) and not settings.allow_unsigned_twilio,
-                "selfhost_calls": settings.selfhost_enabled,
+                "selfhost_calls": settings.selfhost_enabled, "demo_time": settings.demo_time or None,
                 "assemblyai_key": bool(settings.assemblyai_api_key), "inworld_key": bool(settings.inworld_api_key),
                 "live_sessions": sessions["live"]}
 

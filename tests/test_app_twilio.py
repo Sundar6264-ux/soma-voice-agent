@@ -110,6 +110,12 @@ class AppTests(unittest.TestCase):
         self.assertEqual(c.post("/api/orders/99/status", json={"status": "ready"}).status_code, 404)
         self.assertEqual(c.post("/api/orders/1/status", json={"status": "eaten"}).status_code, 400)
 
+    def test_demo_time_fixes_the_agent_clock(self):
+        llm = FakeLLM([say("Hi")])
+        app = create_app(settings(demo_time="18:00"), llm=llm)
+        self.assertEqual(TestClient(app).get("/healthz").json()["demo_time"], "18:00")
+        self.assertEqual(TestClient(create_app(settings(), llm=FakeLLM([]))).get("/healthz").json()["demo_time"], None)
+
     def test_login_disabled_without_admin_key(self):
         c = self.client(admin_key="")
         self.assertEqual(c.get("/login?key=").status_code, 401)

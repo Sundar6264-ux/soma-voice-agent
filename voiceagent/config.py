@@ -45,6 +45,9 @@ class Settings:
     inworld_voice: str = "Ashley"
     inworld_model: str = "inworld-tts-1.5-mini"
     inworld_speaking_rate: float = 1.0
+    # Testing only: "18:00" makes the agent's clock read that time today (restaurant timezone),
+    # so orders can be tested outside opening hours. Empty in real use.
+    demo_time: str = ""
 
     @property
     def selfhost_enabled(self) -> bool:
@@ -84,4 +87,5 @@ class Settings:
             inworld_voice=env("INWORLD_VOICE", "Ashley"),
             inworld_model=env("INWORLD_MODEL", "inworld-tts-1.5-mini"),
             inworld_speaking_rate=float(env("INWORLD_SPEAKING_RATE", "1.0")),
+            demo_time=env("DEMO_TIME", "").strip(),
         )
