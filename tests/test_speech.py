@@ -57,6 +57,25 @@ class InworldConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             _ = [c async for c in tts.synthesize("hi")]
 
 
+class InworldSpeakingRateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rate_override_reaches_the_request_and_fallback_uses_default(self):
+        seen = []
+
+        async def handler(request):
+            body = json.loads(request.content)
+            seen.append((body["voiceId"], body["audioConfig"]["speakingRate"]))
+            if body["voiceId"] == "cloned":
+                return httpx.Response(500, json={"error": "voice unavailable"})
+            return httpx.Response(200, content=ndjson(b"ok"))
+
+        from voiceagent.speech import with_fallback_voice
+        tts = InworldTTS("k", voice="stock", model="m", speaking_rate=1.0,
+                         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        run = with_fallback_voice(tts.synthesize, voice="cloned", fallback="stock", sample_rate=24000, speaking_rate=1.2)
+        self.assertEqual(b"".join([c async for c in run("hi")]), b"ok")
+        self.assertEqual(seen, [("cloned", 1.2), ("stock", 1.0)])
+
+
 if __name__ == "__main__":
     unittest.main()
 

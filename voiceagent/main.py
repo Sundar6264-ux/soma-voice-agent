@@ -87,7 +87,8 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
             else:
                 tts_holder["profile_synth"] = with_fallback_voice(
                     get_tts().synthesize, voice=settings.profile_inworld_voice or settings.inworld_voice,
-                    fallback=settings.inworld_voice, sample_rate=WebSocketTransport.out_rate)
+                    fallback=settings.inworld_voice, sample_rate=WebSocketTransport.out_rate,
+                    speaking_rate=settings.profile_speaking_rate)
         return tts_holder["profile_synth"]
 
     def warm_services() -> None:

@@ -57,6 +57,7 @@ class Settings:
     # "Soma's AI" browser persona (voiceagent/profile.py, README "Soma's AI").
     profile_resume_path: str = "/home/sundar/career-central/resumes/master-resume.md"
     profile_inworld_voice: str = ""          # empty: the same voice as the phone path
+    profile_speaking_rate: float = 1.0       # the cloned voice speaks about 130 words a minute at 1.0
     profile_time_limit_s: int = 600
     # Messages taken by take_message: "on" emails them, "test" emails with a [TEST] subject, "off" only logs.
     message_email: str = "off"
@@ -107,6 +108,7 @@ class Settings:
             demo_time=env("DEMO_TIME", "").strip(),
             profile_resume_path=env("PROFILE_RESUME_PATH", "/home/sundar/career-central/resumes/master-resume.md"),
             profile_inworld_voice=env("PROFILE_INWORLD_VOICE", ""),
+            profile_speaking_rate=float(env("PROFILE_SPEAKING_RATE", "1.0")),
             profile_time_limit_s=int(env("PROFILE_TIME_LIMIT_S", "600")),
             message_email=env("MESSAGE_EMAIL", "off").strip().lower() or "off",
         )

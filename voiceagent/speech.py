@@ -156,15 +156,17 @@ class InworldTTS:
         except Exception as exc:  # a failed warm-up changes nothing: the first sentence connects as before
             log.debug("Inworld warm-up failed: %r", exc)
 
-    async def synthesize(self, text: str, *, sample_rate: int = 8000, voice: str | None = None) -> AsyncIterator[bytes]:
-        """Yield raw PCM chunks at `sample_rate` as Inworld generates them, in `voice` (default: self.voice)."""
+    async def synthesize(self, text: str, *, sample_rate: int = 8000, voice: str | None = None,
+                         speaking_rate: float | None = None) -> AsyncIterator[bytes]:
+        """Yield raw PCM chunks at `sample_rate` as Inworld generates them, in `voice` (default: self.voice)
+        at `speaking_rate` (default: self.speaking_rate; Inworld accepts 0.5 to 1.5)."""
         if self._slots is None:
             self._slots = asyncio.Semaphore(self.max_concurrent)
         body = {
             "text": text,
             "voiceId": voice or self.voice,
             "modelId": self.model,
-            "audioConfig": {"audioEncoding": "PCM", "sampleRateHertz": sample_rate, "speakingRate": self.speaking_rate},
+            "audioConfig": {"audioEncoding": "PCM", "sampleRateHertz": sample_rate, "speakingRate": speaking_rate or self.speaking_rate},
         }
         headers = {"Authorization": f"Basic {self.api_key}", "Content-Type": "application/json"}
         async with self._slots:
@@ -190,13 +192,14 @@ class InworldTTS:
                     return
 
 
-def with_fallback_voice(synthesize, *, voice: str, fallback: str, sample_rate: int):
-    """A synthesize(text) for one persona: `voice` first, and if synthesis fails before any audio arrived
-    (a cloned voice can be rejected or rate limited), the same sentence once more in `fallback`."""
+def with_fallback_voice(synthesize, *, voice: str, fallback: str, sample_rate: int, speaking_rate: float | None = None):
+    """A synthesize(text) for one persona: `voice` first (at `speaking_rate`: a cloned voice can be
+    slower than the stock ones), and if synthesis fails before any audio arrived (a cloned voice can be
+    rejected or rate limited), the same sentence once more in `fallback` at its normal rate."""
     async def run(text: str) -> AsyncIterator[bytes]:
         started = False
         try:
-            async for chunk in synthesize(text, sample_rate=sample_rate, voice=voice):
+            async for chunk in synthesize(text, sample_rate=sample_rate, voice=voice, speaking_rate=speaking_rate):
                 started = True
                 yield chunk
             return
