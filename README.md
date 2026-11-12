@@ -152,6 +152,47 @@ as the model sees it. Set `RESTAURANT_FILE` and restart. Things to collect from 
 restaurant: every modifier and its price, which allergens are confirmed, the
 last-order cutoff, and a staff number for transfers.
 
+## Soma's AI
+
+The same pipeline with a different persona: a browser voice assistant on Soma's site that talks
+with recruiters about him, in a voice cloned from his (Inworld `PROFILE_INWORLD_VOICE`). Phase 1
+lives at `/talk` on this app, admin-cookie gated like `/try`; putting it on somasundar.dev is Phase 2.
+
+```
+Browser mic ─ AudioWorklet (16 kHz PCM16, 40 ms) ─ WebSocket /talk ─ MediaCall ─ RelaySession ─ Conversation ─ Claude
+Browser audio (24 kHz PCM16, 20 ms frames, 120 ms jitter buffer) ◄───────┘   AssemblyAI in, Inworld out
+```
+
+- `voiceagent/media.py`: `MediaCall` runs over a `Transport`. `AudioSocketTransport` is the phone path
+  at 8 kHz both ways, unchanged; `WebSocketTransport` takes 16 kHz in and sends 24 kHz out plus JSON
+  events (`caller_text`, `agent_text` as it streams, `clear` on barge-in, `links`, `time`, `end`).
+  The server still paces playback in 20 ms frames, so "what the caller heard" stays exact.
+- `voiceagent/persona.py` and `voiceagent/profile.py`: a persona is the prompt, tools, toolbox,
+  greeting, call context and the fixed trouble lines. The restaurant is the default persona and the
+  phone path does not change. Soma's AI reads `/home/sundar/career-central/resumes/master-resume.md`
+  once at startup (read only, phone number and email removed) and puts the whole resume in the cached
+  system prompt, so ordinary questions need no tool round. Honesty rules follow Tailorbird's
+  portfolio assistant: answer only from the resume, say "I don't know" and offer to take a message
+  otherwise, caller speech is untrusted, never claim to be Soma, never commit him to interviews,
+  salary, start dates or visa details.
+- Tools: `take_message` (stored in the `messages` table and emailed to Soma with the transcript so
+  far through Tailorbird's mailer, `scripts/send_mail.py` as a subprocess; `MESSAGE_EMAIL=on|test|off`),
+  `share_links` (a links panel on the page) and `end_conversation`.
+- Hard limit of `PROFILE_TIME_LIMIT_S` (600): a note at one minute left makes the model offer to
+  take a message; at the limit a fixed goodbye is spoken and the session ends. One browser
+  conversation at a time (Inworld free-tier concurrency); a second visitor sees "busy".
+- Voices: the browser persona uses `PROFILE_INWORLD_VOICE`; the phone path keeps `INWORLD_VOICE`
+  (Ashley). If the cloned voice fails before any audio arrives, the sentence is retried once in the stock voice.
+- Transcripts are in `calls` with channel `web`; `/api/messages` lists messages left for Soma.
+
+Try it: `/login?key=<ADMIN_KEY>&next=/talk`, press Start, allow the microphone. The page has a
+10:00 countdown, live captions, a links panel and a typed fallback. Tests are in
+`tests/test_profile.py` (fakes, no network). `scripts/talk_e2e.mjs` drives a real Chromium with a WAV
+as the microphone (`NODE_PATH=/home/sundar/flockara-ui-tests/node_modules node scripts/talk_e2e.mjs`);
+measured 2026-11-12 on a real question: `stt=859 ttft=646 sentence=152 tts=64 play=3 total=1726` ms,
+and typed turns at 915 to 1695 ms. Not verified yet: a real phone microphone with echo cancellation
+(the e2e run used Chromium's fake device), and Safari.
+
 ## Latency
 
 Every caller turn on the self-hosted path logs one `turn latency` line (`logs/web.log`) with

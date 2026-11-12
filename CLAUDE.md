@@ -24,12 +24,17 @@ ConversationRelay (`voiceagent/relay.py`). Both drive the same RelaySession.
   `wait_closed`. Both were real hangs found by tests.
 - Asterisk config is only edited in `asterisk/templates/`; placeholders are
   `@@NAME@@` because `${...}` is Asterisk's own syntax. Never commit `asterisk/etc/`.
+- Personas (`voiceagent/persona.py`): `Conversation` and `RelaySession` never assume a restaurant.
+  Restaurant-specific text and tools belong in `agent.restaurant_persona`, Soma's AI in
+  `voiceagent/profile.py`. The master resume in career-central is read only, never written.
+- `MediaCall` talks to a `Transport` (AudioSocket or browser WebSocket) and nothing else. The phone
+  path must stay 8 kHz both ways; `tests/test_media.py` covers it, `tests/test_profile.py` the browser.
 - No em dashes or en dashes in code, comments, docs or commit messages.
 
 ## Testing
 
-`./manage.sh test` runs the stdlib unittest suite with a scripted fake model and
-makes no API calls. `scripts/chat.py --script` is the one real end-to-end order and
+`./manage.sh test` runs the stdlib unittest suite (80 tests) with a scripted fake model and
+makes no API calls. `scripts/talk_e2e.mjs` is the real-browser check of Soma's AI (a few cents). `scripts/chat.py --script` is the one real end-to-end order and
 costs a few cents. Run it after any prompt or tool change. Validate restaurant files
 with `python -m voiceagent.menu <file>`.
 
