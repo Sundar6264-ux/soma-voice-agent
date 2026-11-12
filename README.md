@@ -76,7 +76,7 @@ How a Twilio call works:
 ```bash
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 cp .env.example .env          # set ANTHROPIC_API_KEY and ADMIN_KEY at least
-./manage.sh test              # 56 tests, no API calls
+./manage.sh test              # 65 tests, no API calls
 ./venv/bin/python scripts/chat.py --script   # one real order end to end (a few cents)
 ./venv/bin/python scripts/chat.py            # talk to it in the terminal
 ./manage.sh start             # 127.0.0.1:8790
@@ -152,6 +152,45 @@ as the model sees it. Set `RESTAURANT_FILE` and restart. Things to collect from 
 restaurant: every modifier and its price, which allergens are confirmed, the
 last-order cutoff, and a staff number for transfers.
 
+## Latency
+
+Every caller turn on the self-hosted path logs one `turn latency` line (`logs/web.log`) with
+the stages in ms: `stt` (caller's last word, from AssemblyAI word timestamps, to the final turn),
+`queue`, `ttft` (Claude request to its first spoken token, tool rounds included), `sentence`
+(first complete sentence), `tts` (sentence to Inworld's first audio byte), `play` (to the first
+frame sent to Asterisk) and `total`.
+
+`scripts/latency_bench.py` measures the same thing with no phone: Inworld speaks a four-line
+pickup order as the caller (one line has a 600 ms pause mid-sentence), each line is streamed to
+a real `MediaCall` over a socket pair at Asterisk's pace, and the reply runs through the real
+AssemblyAI session, Claude, sentence splitter, Inworld and Speaker. `--baseline` reproduces the
+pre-tuning behaviour. One run costs about a cent (it prints its own estimate) and takes 90 s.
+
+Measured 2026-11-12, Haiku 5.5 at low effort, median / p90 over the four turns (ms):
+
+| stage | before | after | note |
+|---|---|---|---|
+| stt (speech end to final turn) | 442 / 495 | 470 / 546 | AssemblyAI sends one, already formatted, end_of_turn message about 210 ms after speech stops |
+| ttft (Claude, incl. tool rounds) | 1312 / 2439 | 1400 / 1786 | every turn in the script needs a tool round, so this is two model requests |
+| sentence | 160 / 198 | 144 / 152 | |
+| tts (Inworld first byte) | 146 / 180 | 84 / 141 | warm connection, 120 s keepalive |
+| play + wire | 8 / 11 | 18 / 19 | |
+| total, speech end to first agent audio | 2172 / 3187 | 2214 / 2460 | |
+
+Read it honestly: the total did not move. Only `tts` improved consistently (78 to 86 ms on three
+of four turns, against 138 to 193 before); `stt` and `ttft` swing by 300 ms or more between runs
+of the same code, and the Claude stage is two requests on every turn of this script.
+
+What changed: the Anthropic and Inworld connections are opened while the greeting plays and kept
+alive for 120 s (httpx dropped them after 5 s, shorter than the gap between turns, so every turn
+paid a TLS handshake), and a final turn is acted on as soon as AssemblyAI reports `end_of_turn`
+rather than only on the formatted copy (no difference today, since this model sends one message,
+but it costs nothing). `min_turn_silence` stays at 400 ms: 250 ms cut the pause utterance off once
+("And I'd also like.") and the probe showed the same 210 ms turn delay at either value. The
+largest remaining cost is the tool round on most turns (one extra Claude request, about 0.6 to
+1.2 s); ideas not done: sending the first clause of a long first sentence to TTS early, a
+prompt-cache pre-warm with `max_tokens: 0` at call start, and 50 ms STT chunks instead of 100 ms.
+
 ## Not verified yet
 
 Self-hosted path: tested against the real Asterisk container (a local call with real
@@ -161,7 +200,7 @@ rejected), but not yet with a real carrier, AssemblyAI or Inworld. Still open:
 - Whether the carrier's call audio reaches this server through the home router, and
   whether RTP port forwarding is needed.
 - AssemblyAI turn timing on real calls (`min_turn_silence` 400 ms and
-  `max_turn_silence` 1280 ms are the defaults set in `speech.py`).
+  `max_turn_silence` 1280 ms, settable in `.env`; see "Latency" for the bench results).
 - Inworld's `PCM` output at 8000 Hz arriving as raw samples, as its docs describe.
 
 Twilio path, written from Twilio's documentation and not tested on a live call:
