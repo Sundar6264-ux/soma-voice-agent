@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from . import profile, twilio
 from .agent import AnthropicLLM, Conversation
@@ -316,12 +316,76 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
 
     # -- Soma's AI: browser voice conversation over our own audio pipeline ----
 
+    def talk_busy() -> bool:
+        return sessions["talk"] >= 1 or sessions["live"] >= settings.max_sessions
+
+    # Public tickets (Phase 2). somasundar.dev's server forwards /api/talk/ticket and the /api/talk/ws upgrade
+    # here with the visitor's cf-connecting-ip and Origin. A ticket is single use, valid for 60 s, bound to the
+    # visitor, and only issued inside the per-visitor and per-day caps, so every public conversation is counted.
+    ticket_secret = secrets.token_bytes(32)
+    used_tickets: dict[str, float] = {}
+
+    def visitor_of(headers) -> str:
+        ip = headers.get("cf-connecting-ip") or headers.get("x-real-ip") or "local"
+        # Keyed with the persistent relay secret so a restart does not reset today's per-visitor counts.
+        return hmac.new(settings.relay_secret.encode(), b"talk-visitor:" + ip.encode(), hashlib.sha256).hexdigest()[:16]
+
+    def origin_ok(headers) -> bool:
+        return headers.get("origin", "") in settings.talk_allowed_origins
+
+    def make_ticket(visitor: str) -> str:
+        body = f"{int(time.time()) + 60}.{secrets.token_hex(8)}.{visitor}"
+        sig = hmac.new(ticket_secret, body.encode(), hashlib.sha256).hexdigest()[:32]
+        return f"{body}.{sig}"
+
+    def take_ticket(ticket: str, visitor: str) -> bool:
+        try:
+            exp, nonce, owner, sig = ticket.split(".")
+            good = hmac.new(ticket_secret, f"{exp}.{nonce}.{owner}".encode(), hashlib.sha256).hexdigest()[:32]
+            now = time.time()
+            if not hmac.compare_digest(sig, good) or int(exp) < now or owner != visitor or nonce in used_tickets:
+                return False
+        except ValueError:
+            return False
+        for key in [k for k, at in used_tickets.items() if at < now - 120]:
+            used_tickets.pop(key, None)
+        used_tickets[nonce] = now
+        return True
+
+    @app.post("/talk/ticket")
+    async def talk_ticket(request: Request):
+        if not settings.talk_public:
+            raise HTTPException(status_code=404, detail="not found")
+        if not origin_ok(request.headers):
+            return JSONResponse({"ok": False, "error": "Not allowed from this site."}, status_code=403)
+        if talk_busy():
+            return JSONResponse({"ok": False, "error": "Soma's AI is talking with someone else right now. Please try again in a few minutes."}, status_code=429)
+        visitor = visitor_of(request.headers)
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        mine, total = store.talk_counts(day, visitor)
+        if mine >= settings.talk_per_ip_day:
+            return JSONResponse({"ok": False, "error": f"That's the limit of {settings.talk_per_ip_day} conversations for today. The contact page reaches Soma directly."}, status_code=429)
+        if total >= settings.talk_per_day:
+            return JSONResponse({"ok": False, "error": "Soma's AI has reached today's limit. Please try again tomorrow, or use the contact page."}, status_code=429)
+        store.record_talk_ticket(day, visitor)
+        return {"ok": True, "ticket": make_ticket(visitor), "left_today": settings.talk_per_ip_day - mine - 1}
+
+    @app.websocket("/talk/public")
+    async def talk_public_ws(websocket: WebSocket, ticket: str = ""):
+        if not settings.talk_public or not origin_ok(websocket.headers) or not take_ticket(ticket, visitor_of(websocket.headers)):
+            await websocket.close(code=4403)
+            return
+        await run_talk(websocket, "pub-")
+
     @app.websocket("/talk")
     async def talk_ws(websocket: WebSocket):
         if not is_admin(websocket.cookies):
             await websocket.close(code=4401)
             return
-        if sessions["talk"] >= 1 or sessions["live"] >= settings.max_sessions:
+        await run_talk(websocket, "web-")
+
+    async def run_talk(websocket: WebSocket, prefix: str):
+        if talk_busy():
             # One browser conversation at a time: the cloned voice runs on Inworld's free-tier concurrency.
             await websocket.accept()
             await websocket.send_json({"type": "busy", "text": "Soma's AI is talking with someone else right now. Please try again shortly."})
@@ -330,7 +394,7 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
         await websocket.accept()
         sessions["talk"] += 1
         sessions["live"] += 1
-        call_id = "web-" + secrets.token_hex(6)
+        call_id = prefix + secrets.token_hex(6)
         try:
             transport = WebSocketTransport(websocket)
             stt = make_stt(transport.in_rate)

@@ -58,6 +58,11 @@ class Settings:
     profile_resume_path: str = "/home/sundar/career-central/resumes/master-resume.md"
     profile_inworld_voice: str = ""          # empty: the same voice as the phone path
     profile_speaking_rate: float = 1.0       # the cloned voice speaks about 130 words a minute at 1.0
+    # Public "Talk to my AI" on somasundar.dev (Phase 2): off unless TALK_PUBLIC=on.
+    talk_public: bool = False
+    talk_per_ip_day: int = 3
+    talk_per_day: int = 20
+    talk_allowed_origins: tuple = ("https://somasundar.dev",)
     profile_time_limit_s: int = 600
     # Messages taken by take_message: "on" emails them, "test" emails with a [TEST] subject, "off" only logs.
     message_email: str = "off"
@@ -109,6 +114,10 @@ class Settings:
             profile_resume_path=env("PROFILE_RESUME_PATH", "/home/sundar/career-central/resumes/master-resume.md"),
             profile_inworld_voice=env("PROFILE_INWORLD_VOICE", ""),
             profile_speaking_rate=float(env("PROFILE_SPEAKING_RATE", "1.0")),
+            talk_public=_flag("TALK_PUBLIC"),
+            talk_per_ip_day=int(env("TALK_PER_IP_DAY", "3")),
+            talk_per_day=int(env("TALK_PER_DAY", "20")),
+            talk_allowed_origins=tuple(o.strip() for o in env("TALK_ALLOWED_ORIGINS", "https://somasundar.dev").split(",") if o.strip()),
             profile_time_limit_s=int(env("PROFILE_TIME_LIMIT_S", "600")),
             message_email=env("MESSAGE_EMAIL", "off").strip().lower() or "off",
         )

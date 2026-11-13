@@ -296,3 +296,54 @@ class BrowserTransportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicTalkTests(unittest.TestCase):
+    ORIGIN = {"origin": "https://somasundar.dev", "cf-connecting-ip": "203.0.113.7"}
+
+    def make(self, **overrides):
+        s = replace(base_settings(**overrides), admin_key="letmein", profile_time_limit_s=600)
+        self.app = create_app(s, llm=FakeLLM([say("Hi there.")]), stt_factory=FakeSTT, synthesize=fake_tts(),
+                              frame_seconds=0.001, mailer=[].append, resume_text=profile.clean_resume(RESUME))
+        return TestClient(self.app, base_url="https://testserver")
+
+    def test_public_endpoints_off_by_default(self):
+        client = self.make()
+        self.assertEqual(client.post("/talk/ticket", headers=self.ORIGIN).status_code, 404)
+
+    def test_ticket_needs_site_origin(self):
+        client = self.make(talk_public=True)
+        r = client.post("/talk/ticket", headers={"origin": "https://evil.example", "cf-connecting-ip": "1.2.3.4"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_per_visitor_and_daily_caps(self):
+        client = self.make(talk_public=True, talk_per_ip_day=2, talk_per_day=3)
+        ok = [client.post("/talk/ticket", headers=self.ORIGIN) for _ in range(2)]
+        self.assertTrue(all(r.json()["ok"] for r in ok))
+        self.assertEqual(ok[-1].json()["left_today"], 0)
+        third = client.post("/talk/ticket", headers=self.ORIGIN)
+        self.assertEqual(third.status_code, 429)
+        self.assertIn("limit of 2", third.json()["error"])
+        other = {"origin": "https://somasundar.dev", "cf-connecting-ip": "198.51.100.9"}
+        self.assertTrue(client.post("/talk/ticket", headers=other).json()["ok"])  # 3rd of the day overall
+        self.assertEqual(client.post("/talk/ticket", headers={**other, "cf-connecting-ip": "198.51.100.10"}).status_code, 429)
+
+    def test_socket_needs_valid_single_use_ticket_from_same_visitor(self):
+        from starlette.websockets import WebSocketDisconnect
+        client = self.make(talk_public=True)
+        ticket = client.post("/talk/ticket", headers=self.ORIGIN).json()["ticket"]
+        for bad_url, bad_headers in [("/talk/public?ticket=nope", self.ORIGIN),
+                                     (f"/talk/public?ticket={ticket}", {**self.ORIGIN, "origin": "https://evil.example"}),
+                                     (f"/talk/public?ticket={ticket}", {**self.ORIGIN, "cf-connecting-ip": "9.9.9.9"})]:
+            with self.assertRaises(WebSocketDisconnect) as ctx:
+                with client.websocket_connect(bad_url, headers=bad_headers):
+                    pass
+            self.assertEqual(ctx.exception.code, 4403)
+        with client.websocket_connect(f"/talk/public?ticket={ticket}", headers=self.ORIGIN) as ws:
+            first = ws.receive_json()
+            self.assertEqual(first["token"], profile.GREETING)
+            ws.send_text(json.dumps({"type": "hangup"}))
+        with self.assertRaises(WebSocketDisconnect) as ctx:  # the same ticket cannot be used twice
+            with client.websocket_connect(f"/talk/public?ticket={ticket}", headers=self.ORIGIN):
+                pass
+        self.assertEqual(ctx.exception.code, 4403)

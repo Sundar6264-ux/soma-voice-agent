@@ -3,6 +3,9 @@
 (function () {
   const OUT_RATE = 24000, IN_RATE = 16000, JITTER_S = 0.12, LIMIT_S = 600;
   const $ = id => document.getElementById(id);
+  // Optional config on #talk-root (used on somasundar.dev): data-ws, data-ticket, data-worklet.
+  const cfg = ($("talk-root") || document.body).dataset;
+  const WS_PATH = cfg.ws || "/talk", TICKET_URL = cfg.ticket || "", WORKLET_URL = cfg.worklet || "/static/talk-worklet.js";
   const captions = $("captions"), stateEl = $("state"), startBtn = $("start"), clock = $("clock");
   const linksEl = $("links"), statsEl = $("stats"), typedForm = $("typed"), typedText = $("typed-text");
 
@@ -110,7 +113,7 @@
       await ctx.resume();
       mic = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, video: false });
-      await ctx.audioWorklet.addModule("/static/talk-worklet.js");
+      await ctx.audioWorklet.addModule(WORKLET_URL);
       worklet = new AudioWorkletNode(ctx, "talk-capture", { numberOfInputs: 1, numberOfOutputs: 0 });
       source = ctx.createMediaStreamSource(mic);
       source.connect(worklet);
@@ -120,7 +123,22 @@
       await teardownAudio();
       return;
     }
-    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/talk");
+    let query = "";
+    if (TICKET_URL) {
+      // Public site: ask for a short-lived ticket first (it enforces the daily limits).
+      try {
+        const r = await fetch(TICKET_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.ok) throw new Error(d.error || "Soma's AI is unavailable right now.");
+        query = "?ticket=" + encodeURIComponent(d.ticket);
+      } catch (e) {
+        setState(e.message || String(e));
+        startBtn.disabled = false;
+        await teardownAudio();
+        return;
+      }
+    }
+    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + WS_PATH + query);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       started = Date.now(); tick(); ticker = setInterval(tick, 1000);
@@ -133,6 +151,7 @@
     ws.onclose = e => {
       if (e.code === 4401) setState("Log in first (open /login?key=... then come back).");
       else if (e.code === 4429) setState("Soma's AI is busy with someone else. Try again shortly.");
+      else if (e.code === 4403) setState("That link expired. Press Start to try again.");
       else if (started) setState("Conversation ended.");
       stop(true);
     };

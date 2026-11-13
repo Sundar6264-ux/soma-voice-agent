@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS orders_created ON orders(created_at);
+CREATE TABLE IF NOT EXISTS talk_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    visitor TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS talk_tickets_day ON talk_tickets(day, visitor);
 CREATE TABLE IF NOT EXISTS stt_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     call_sid TEXT,
@@ -130,6 +137,16 @@ class Store:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    def talk_counts(self, day: str, visitor: str) -> tuple[int, int]:
+        """(tickets issued to this visitor today, tickets issued to everyone today)."""
+        with self._conn() as conn:
+            mine = conn.execute("SELECT COUNT(*) FROM talk_tickets WHERE day = ? AND visitor = ?", (day, visitor)).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM talk_tickets WHERE day = ?", (day,)).fetchone()[0]
+        return mine, total
+
+    def record_talk_ticket(self, day: str, visitor: str) -> None:
+        self._write("INSERT INTO talk_tickets (day, visitor, created_at) VALUES (?,?,?)", (day, visitor, utcnow()))
 
     def record_stt(self, call_sid: str, seconds: float) -> None:
         if seconds > 0:
