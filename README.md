@@ -1,8 +1,24 @@
-# Restaurant voice agent
+# Soma's AI: a self-hosted, real-time voice agent on Claude
 
-A phone line that takes pickup orders for a restaurant. A caller dials a Twilio
-number, talks to Claude like they would to a person at the counter, and the
-confirmed order shows up on a kitchen board with an order number and pickup time.
+One voice pipeline, two agents built on it:
+
+- **Soma's AI** (live at [somasundar.dev/recruiters](https://somasundar.dev/recruiters/#talk)): talk to it in the
+  browser and it answers questions about Soma Sundar Mamilla out loud, in a voice cloned from his, using only his
+  resume. It can share his links or take a message, never makes commitments for him, and says up front that it is
+  an AI. Code: `voiceagent/profile.py`, `voiceagent/static/talk.js`.
+- **Restaurant ordering demo**: a phone line that takes pickup orders for a fictional restaurant, with prices,
+  totals and order rules computed in code, a read-back before any order is placed, and a kitchen board. Code:
+  `voiceagent/prompts.py`, `tools.py`, `order.py`, `restaurants/demo.yaml`.
+
+Pipeline: caller audio (phone through Asterisk, or browser over a WebSocket) -> AssemblyAI streaming speech-to-text
+-> Claude Haiku 5.5 with tools -> Inworld TTS (2 Flash) -> audio paced back in 20 ms frames, with barge-in that
+tells the model exactly which words the caller heard. Replies start about 1 to 1.7 s after the caller stops
+talking; a conversation costs about $0.0125 a minute. See "Latency" and "Soma's AI" below.
+
+## Restaurant ordering demo
+
+A phone line that takes pickup orders for a restaurant. A caller dials a number, talks to Claude like they would
+to a person at the counter, and the confirmed order shows up on a kitchen board with an order number and pickup time.
 
 The demo restaurant is fictional (Juniper Street Kitchen, `restaurants/demo.yaml`).
 A real restaurant is one YAML file: menu, options, prices, hours, tax, facts and a
