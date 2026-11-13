@@ -259,3 +259,11 @@ Delivery (addresses and zones), scheduled pickup times, SMS confirmation with th
 order number, POS or printer handoff instead of the board, menu items marked out of
 stock from the board, more than one restaurant per deployment, and a transcript
 review page for tuning the prompt.
+
+### Public: somasundar.dev/recruiters (Phase 2, live 2026-11-12)
+
+The portfolio server (`/home/sundar/portfolio/scripts/serve.mjs`) forwards `POST /api/talk/ticket` here and pipes the
+`/api/talk/ws` WebSocket to `/talk/public`. A ticket is issued only to the https://somasundar.dev origin, inside
+`TALK_PER_IP_DAY` (3) and `TALK_PER_DAY` (20), one conversation at a time; it is single use, valid 60 s and bound
+to the visitor (cf-connecting-ip, hashed). `TALK_PUBLIC=on` enables it. The private `/talk` page (admin login) is
+unchanged. Tests: `PublicTalkTests` in `tests/test_profile.py`.
