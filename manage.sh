@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ./manage.sh {start|stop|restart|status|test}
+# ./manage.sh {start|stop|restart|status|boot|test}
 #             {asterisk-build|asterisk-start|asterisk-stop|asterisk-status|asterisk-cli}
 # Runs the app detached on 127.0.0.1:${PORT:-8790}; logs in logs/web.log.
 # Asterisk runs in Docker (host network, restarts with the Docker daemon); logs: docker logs rva-asterisk.
@@ -7,12 +7,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 PORT="${PORT:-8790}"
 PIDFILE="logs/web.pid"
-mkdir -p logs
+MARKER=".run/stopped"
+mkdir -p logs .run
 
 running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 case "${1:-status}" in
   start)
+    rm -f "$MARKER"
     if running; then echo "already running (pid $(cat "$PIDFILE"))"; exit 0; fi
     setsid nohup ./venv/bin/uvicorn voiceagent.main:_app_factory --factory \
       --host 127.0.0.1 --port "$PORT" --proxy-headers --forwarded-allow-ips 127.0.0.1 \
@@ -27,7 +29,13 @@ case "${1:-status}" in
     echo "did not come up; tail logs/web.log"; exit 1
     ;;
   stop)
+    touch "$MARKER"
     if running; then kill "$(cat "$PIDFILE")"; rm -f "$PIDFILE"; echo stopped; else echo "not running"; fi
+    ;;
+  boot)
+    # For cron (@reboot and hourly): start unless stopped on purpose with ./manage.sh stop.
+    if [[ -f "$MARKER" ]]; then echo "deliberately stopped; not starting"; exit 0; fi
+    "$0" start
     ;;
   restart)
     "$0" stop; sleep 1; "$0" start
