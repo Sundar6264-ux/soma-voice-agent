@@ -384,6 +384,23 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
             return
         await run_talk(websocket, "web-")
 
+    def send_transcript(call, call_id: str, started_wall: float, seconds: float) -> None:
+        """Email Soma the transcript of every Soma's AI conversation (TRANSCRIPT_EMAIL=off turns it off)."""
+        conv = getattr(call.relay, "conv", None)
+        if not settings.transcript_email or conv is None:
+            return
+        try:
+            payload = profile.transcript_email(
+                call_id=call_id, started=started_wall, seconds=seconds, outcome=conv.outcome(),
+                transcript=conv.transcript, message_ids=list(getattr(conv.toolbox, "message_ids", [])),
+                test=settings.message_email == "test")
+            if payload is None:
+                log.warning("transcript for %s not emailed: OWNER_EMAIL is not set", call_id)
+                return
+            (mailer or profile.send_mail_subprocess)(payload)
+        except Exception:
+            log.exception("could not email the transcript for %s", call_id)
+
     async def run_talk(websocket: WebSocket, prefix: str):
         if talk_busy():
             # One browser conversation at a time: the cloned voice runs on Inworld's free-tier concurrency.
@@ -406,10 +423,12 @@ def create_app(settings: Settings | None = None, llm=None, stt_factory=None, syn
                              synthesize=get_profile_synth(), make_relay=make_relay, time_limit=limit,
                              warn_at=max(0, limit - PROFILE_WARN_BEFORE_END_S), **kwargs)
             warm_services()
+            started_wall, started = time.time(), time.monotonic()
             try:
                 await call.run()
             finally:
                 store.record_stt(call_id, getattr(stt, "billed_seconds", 0.0))
+                send_transcript(call, call_id, started_wall, time.monotonic() - started)
         except Exception:
             log.exception("talk session %s failed", call_id)
         finally:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import logging
 import re
 import subprocess
@@ -165,6 +166,26 @@ def format_transcript(transcript: list[dict]) -> str:
             flag = " (interrupted)" if t.get("interrupted") else ""
             lines.append(f"Assistant{flag}: {t.get('text', '')}")
     return "\n".join(lines)
+
+
+def transcript_email(*, call_id: str, started: float, seconds: float, outcome: str, transcript: list[dict],
+                     message_ids: list[int], test: bool = False) -> dict | None:
+    """The email sent to Soma after every Soma's AI conversation; None when OWNER_EMAIL is not set."""
+    to = owner_email()
+    if not to:
+        return None
+    where = "somasundar.dev visitor" if call_id.startswith("pub-") else "private test page"
+    caller_turns = sum(1 for t in transcript if t.get("role") == "caller")
+    when = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(started))
+    subject = (f"{'[TEST] ' if test else ''}Soma's AI conversation: {int(seconds // 60)}m {int(seconds % 60):02d}s, "
+               f"{caller_turns} caller turn{'s' if caller_turns != 1 else ''}"
+               + (", message left" if message_ids else ""))
+    body = (f"A conversation with Soma's AI just ended.\n\n"
+            f"Where: {where}\nStarted: {when}\nLength: {int(seconds // 60)} min {int(seconds % 60)} s\n"
+            f"Outcome: {outcome}\nMessages left: {len(message_ids)}"
+            + (f" (ids {', '.join(map(str, message_ids))})" if message_ids else "") + f"\nConversation id: {call_id}\n\n"
+            f"Transcript:\n{format_transcript(transcript) or '(the visitor did not say anything)'}\n")
+    return {"to": to, "subject": subject, "body": body, "brand": "flockara"}
 
 
 def send_mail_subprocess(payload: dict) -> None:

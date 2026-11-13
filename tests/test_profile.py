@@ -1,6 +1,7 @@
 """Soma's AI: the persona, its tools, the time limit and the browser transport. No network."""
 import asyncio
 import json
+import time
 import os
 import unittest
 from dataclasses import replace
@@ -349,3 +350,42 @@ class PublicTalkTests(unittest.TestCase):
             with client.websocket_connect(f"/talk/public?ticket={ticket}", headers=self.ORIGIN):
                 pass
         self.assertEqual(ctx.exception.code, 4403)
+
+
+class TranscriptEmailTests(unittest.TestCase):
+    def test_every_conversation_emails_a_transcript(self):
+        os.environ["OWNER_EMAIL"] = "owner@example.com"
+        sent = []
+        s = replace(base_settings(), admin_key="letmein", profile_time_limit_s=600, talk_public=True)
+        app = create_app(s, llm=FakeLLM([say("Hi there.")]), stt_factory=FakeSTT, synthesize=fake_tts(),
+                         frame_seconds=0.001, mailer=sent.append, resume_text=profile.clean_resume(RESUME))
+        client = TestClient(app, base_url="https://testserver")
+        headers = {"origin": "https://somasundar.dev", "cf-connecting-ip": "203.0.113.50"}
+        ticket = client.post("/talk/ticket", headers=headers).json()["ticket"]
+        with client.websocket_connect(f"/talk/public?ticket={ticket}", headers=headers) as ws:
+            ws.receive_json()
+            ws.send_text(json.dumps({"type": "hangup"}))
+        for _ in range(100):
+            if sent:
+                break
+            time.sleep(0.02)
+        self.assertEqual(len(sent), 1)
+        mail = sent[0]
+        self.assertEqual(mail["to"], "owner@example.com")
+        self.assertTrue(mail["subject"].startswith("Soma's AI conversation: "))
+        self.assertIn("Where: somasundar.dev visitor", mail["body"])
+        self.assertIn("Transcript:", mail["body"])
+
+    def test_subject_and_missing_owner_email(self):
+        os.environ["OWNER_EMAIL"] = "owner@example.com"
+        payload = profile.transcript_email(call_id="web-1", started=0, seconds=75, outcome="no_message",
+                                           transcript=[{"role": "caller", "text": "Hi"}], message_ids=[7])
+        self.assertEqual(payload["subject"], "Soma's AI conversation: 1m 15s, 1 caller turn, message left")
+        self.assertIn("Where: private test page", payload["body"])
+        self.assertIn("Caller: Hi", payload["body"])
+        os.environ["OWNER_EMAIL"] = ""
+        try:
+            self.assertIsNone(profile.transcript_email(call_id="web-1", started=0, seconds=1, outcome="x",
+                                                       transcript=[], message_ids=[]))
+        finally:
+            os.environ["OWNER_EMAIL"] = "owner@example.com"

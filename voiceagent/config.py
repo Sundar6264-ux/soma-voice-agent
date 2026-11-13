@@ -60,6 +60,7 @@ class Settings:
     profile_speaking_rate: float = 1.0       # the cloned voice speaks about 130 words a minute at 1.0
     # Public "Talk to my AI" on somasundar.dev (Phase 2): off unless TALK_PUBLIC=on.
     talk_public: bool = False
+    transcript_email: bool = True   # email Soma the transcript after every Soma's AI conversation
     talk_per_ip_day: int = 3
     talk_per_day: int = 20
     talk_allowed_origins: tuple = ("https://somasundar.dev",)
@@ -115,6 +116,7 @@ class Settings:
             profile_inworld_voice=env("PROFILE_INWORLD_VOICE", ""),
             profile_speaking_rate=float(env("PROFILE_SPEAKING_RATE", "1.0")),
             talk_public=_flag("TALK_PUBLIC"),
+            transcript_email=env("TRANSCRIPT_EMAIL", "on").strip().lower() not in {"off", "0", "no", "false"},
             talk_per_ip_day=int(env("TALK_PER_IP_DAY", "3")),
             talk_per_day=int(env("TALK_PER_DAY", "20")),
             talk_allowed_origins=tuple(o.strip() for o in env("TALK_ALLOWED_ORIGINS", "https://somasundar.dev").split(",") if o.strip()),
