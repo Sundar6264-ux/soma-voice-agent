@@ -1,6 +1,7 @@
 """Soma's AI: the persona, its tools, the time limit and the browser transport. No network."""
 import asyncio
 import json
+import os
 import unittest
 from dataclasses import replace
 
@@ -62,6 +63,7 @@ class PromptTests(unittest.TestCase):
 
 class ToolTests(unittest.TestCase):
     def setUp(self):
+        os.environ["OWNER_EMAIL"] = "owner@example.com"
         self.store = temp_store()
         self.sent = []
         self.box = profile.ProfileToolBox(self.store, CallInfo("web-1", channel="web"), mode="on", mailer=self.sent.append)
@@ -90,7 +92,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual((rows[0]["name"], rows[0]["company"], rows[0]["contact"], rows[0]["role"]), ("Ann Lee", "Acme", "ann@acme.com", "FDE"))
         self.assertEqual(len(self.sent), 1)
         mail = self.sent[0]
-        self.assertEqual(mail["to"], profile.MESSAGE_TO)
+        self.assertEqual(mail["to"], "owner@example.com")
         self.assertTrue(mail["subject"].startswith("Message for Soma from Ann Lee"))
         self.assertIn("Please call about the FDE role.", mail["body"])
         self.assertIn("Caller: Hi, I'd like to leave a message.", mail["body"])

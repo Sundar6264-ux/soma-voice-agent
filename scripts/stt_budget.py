@@ -26,12 +26,14 @@ sys.path.insert(0, str(ROOT))
 from voiceagent.config import load_dotenv  # noqa: E402
 
 THRESHOLDS = (50, 80, 95)
-ALERT_TO = "owner@example.com"
+ALERT_TO = ""  # filled from OWNER_EMAIL in .env by usage()
 STATE = ROOT / "logs" / "stt_alerts.json"
 
 
 def usage() -> dict:
     load_dotenv(ROOT / ".env")
+    global ALERT_TO
+    ALERT_TO = os.environ.get("OWNER_EMAIL", "")
     credit = float(os.environ.get("STT_CREDIT_USD", "50"))
     rate = float(os.environ.get("STT_RATE_PER_HOUR", "0.15"))
     db = Path(os.environ.get("DB_PATH", str(ROOT / "voiceagent.db")))

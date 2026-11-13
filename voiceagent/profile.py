@@ -12,6 +12,7 @@ share_links (an event the browser shows as a panel) and end_conversation.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import subprocess
@@ -28,7 +29,9 @@ log = logging.getLogger(__name__)
 
 PERSONA_ID = "soma-ai"
 OWNER = "Soma Sundar Mamilla"
-MESSAGE_TO = "owner@example.com"
+def owner_email() -> str:
+    """Where messages are emailed: OWNER_EMAIL in .env (read at send time, never committed)."""
+    return os.environ.get("OWNER_EMAIL", "").strip()
 TAILORBIRD_PYTHON = "/home/sundar/tailorbird-web/venv/bin/python"
 SEND_MAIL_SCRIPT = str(Path(__file__).resolve().parent.parent / "scripts" / "send_mail.py")
 
@@ -214,8 +217,10 @@ class ProfileToolBox:
                 f"From: {name}\nCompany: {company or 'unknown'}\nContact: {contact}\n"
                 f"Role: {role or 'not given'}\n\nMessage:\n{message}\n\n"
                 f"Transcript so far:\n{format_transcript(self.transcript)}\n")
-        if self.mode in ("on", "test"):
-            self.mailer({"to": MESSAGE_TO, "subject": f"{prefix}Message for Soma from {name} ({company or 'unknown'})",
+        if self.mode in ("on", "test") and not owner_email():
+            log.warning("message %s stored but not emailed: OWNER_EMAIL is not set", message_id)
+        elif self.mode in ("on", "test"):
+            self.mailer({"to": owner_email(), "subject": f"{prefix}Message for Soma from {name} ({company or 'unknown'})",
                          "body": body, "brand": "flockara"})
         else:
             log.info("message %s stored (MESSAGE_EMAIL=off, not emailed): %s at %s", message_id, name, company)
